@@ -66,7 +66,7 @@ export class PlayerMenu extends Win {
       [M.BtSave, () => { navigator.clipboard?.writeText(name).catch(() => {}); g.statusBar.focusChat(); }],
       [M.BtTrade, () => g.requestTrade(target)],
       [M.BtWhisper, () => g.statusBar.focusChat(`/w ${name} `)],
-      (!g.party || g.party.leader === g.player.id) && [M.BtParty, () => { if (!g.party) g.net?.partyOp(1); g.net?.partyOp(4, name); }],
+      (!g.party || g.party.leader === g.player.id) && [M.BtParty, () => g.partyInvite(name)],
       g.guild && (guildRank === 1 || guildRank === 2) && [M.BtGuild, () => g.net?.guildOp(5, name)],
       [M.BtClaim, () => g.openReport(name)],
       g.family && g.family.juniors < g.family.maxJuniors && [M.BtFamily, () => g.net?.familyAdd(name)],
@@ -118,13 +118,16 @@ export class CharInfoWin extends Win {
     const U = mgr.W.UserInfo;
     super(mgr, null, 200, 60);
     this.w = 275; this.h = 199;
+    this.tabListed = true;   // among the windows Tab looks at (it has no tabs of its own)
     this.closePinned = true; this.closeBtn.x = 275 - 17;
     // with a pet out it opens on PET INFO
     this.U = U; this.info = info; this.panel = info.pets?.length ? 'pet' : 'none'; this.side = null; this.sideFirst = 0; this.petSel = 0;
     const g = this.g, other = info.id !== g.player.id;
-    // PARTY invites only from a party's leader (with no party it does nothing); PARTY and TRADE are off on your own window
+    // PARTY invites them whether or not you are in a party yet (the server makes one with you as its leader first);
+    // PARTY and TRADE are off on your own window
     const party = this.button(U.BtParty, 149, 23, () => {
-      if (g.party && g.party.leader === g.player.id) g.net?.partyOp(4, this.name());
+      const name = this.name();
+      if (name) g.net?.partyOp(4, name);
     });
     party.enabled = other;
     const rp = g.others.get(info.id);

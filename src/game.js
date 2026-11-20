@@ -1,5 +1,5 @@
 import { GameMap, nameTag, artTag, Anim } from './map.js';
-import { Footholds, PHYS, accelerate, approach, swimVelocity } from './physics.js';
+import { Footholds, PHYS, accelerate, approach, groundVelocity, swimVelocity } from './physics.js';
 import { CharacterLook, drawParts, lookCanvases, equipPath, composeMounted, mountCanvases, mountPose, charSprites, setCharSprites, spriteFrame, makeSprite, holdFrame } from './character.js';
 import { weaponMultiplier, itemIcon, itemRewardIcon, itemSpec, itemReward, itemInfo, mesoIcon, invType, isScroll, scrollFits, ACTIONS, EXP, itemName, advanceName } from './data.js';
 import { stanceByte, STANCE_NAMES, lookEquipIds } from './net/proto.js';
@@ -9,13 +9,14 @@ import { QuestBook, TITLE_AREA } from './quests.js';
 import { MedalWin } from './ui/medal.js';
 import { MemoWin } from './ui/memo.js';
 import { ClaimNotice, ClaimForm } from './ui/claim.js';
-import { npcTalk, localTalk, NpcDialog, SlideMenu, PetSelectDialog, ShopWin, drawItemTip, drawSkillTip, DeathNotice, UtilBox } from './ui/dialogs.js';
+import { npcTalk, localTalk, NpcDialog, SlideMenu, PetSelectDialog, ShopWin, drawItemTip, drawSkillTip, DeathNotice, UtilBox, SkillUpNotice } from './ui/dialogs.js';
 import { npcQuestMenu, playQuestLines, questFlow } from './ui/quests-ui.js';
 import { QuestMessages } from './ui/questmsg.js';
 import { QuestAlert } from './questalert.js';
 import { SkillBook, skillMaxDamage, critical, criticalBreakdown, RANGED_WEAPONS, NO_AMMO_SHOTS } from './skills.js';
 import { CODE_TO_SC, defaultKeymap, ACTION, MENU, DEFAULT_QUICKSLOTS, DEFAULT_QUICKSLOTS2, loadQuickKeys2 } from './keymap.js';
-import { loadControls } from './controls.js';
+import { loadControls, saveControls } from './controls.js';
+import { MobileHud } from './ui/mobilehud.js';
 import { PadInput } from './gamepad.js';
 import { TouchControls } from './ui/touch.js';
 import { WorldFx, EquipEffect, lineDelay } from './effects.js';
@@ -76,14 +77,14 @@ import { KiteInputWin, KiteMessageWin, MemoSendWin, CancelRequestWin, CancelResu
 import { StorageWin } from './ui/storage.js';
 import { WorldMapWin } from './ui/worldmap.js';
 import { Pet, pickReaction, NO_LOOT_MAP } from './pets.js';
-import { Summon, PUPPET_RANGE, PUPPETS } from './summons.js';
+import { Summon, PUPPET_RANGE, PUPPETS, MAGIC_SUMMONS } from './summons.js';
 import { Dragon } from './dragon.js';
 import { CashShopWin } from './ui/cashshop.js';
 import { ChannelSession } from './net/channel.js';
 import { wsTransport } from './net/connection.js';
 import { bridgeUrl } from './ui/login-ui.js';
 import { settings, saveSettings } from './settings.js';
-import { VIEW_W, VIEW_H, UI_W, UI_H, UI_SCALE, applyResolution, snapPx, setPixelScale, PIXEL_SCALE } from './view.js';
+import { VIEW_W, VIEW_H, UI_W, UI_H, UI_SCALE, applyResolution, snapPx, setPixelScale, PIXEL_SCALE, setWholeScreen } from './view.js';
 import { config, refreshPublished } from './config.js';
 import { frameMaker } from './framemaker.js';
 import { DirectionScene } from './direction.js';
@@ -353,6 +354,32 @@ const DRAGON_ROAR = 1311006;
 const MONSTER_MAGNETS = new Set([1121001, 1221001, 1321001]), CHARGE_HOLD = 1;
 /** Big Bang: held up to 1s; its box is centred on you and grows with the charge. */
 const BIG_BANGS = new Set([2121001, 2221001, 2321001]);
+/** What /? and /Help print. */
+const SLASH_HELP = [
+  "----------------- HELP -----------------",
+  "/partyinfo : Show the current party information.",
+  "/makeparty : create a new party",
+  "/leaveparty : If you are a member of the party, it'll let you leave..",
+  "/partyinvite character-name : invite to our party (only for the party leader)",
+  "/partyexpel character-name: Expel someone from the party (only for the party leader)",
+  "/guildinfo : Give information about the guild",
+  "/leaveguild : Quit the guild",
+  "/guildinvite : Invite the user to the guild (only available to the master)",
+  "/guildexpel : Expel the user from the guild (only available to the master)",
+  "/find CharacterName : Give information about the chracter whether he or she is on-line or not.",
+  "/gametrade charactername: Request to trade game items.",
+  "/tradecash Charactername: Request to trade cash items.",
+  "/buddy: Talk to your buddy.",
+  "/party: Talk to party members.",
+  "/guild: Talk to your guild members.",
+  "/whisper charactername: Send a whisper (if no name is written, it'll be directed to your last contact).",
+  "/all: Regular chat, not a whisper.",
+  "* Open up the chat window and press tab, or close the chat window and",
+  "press 1, 2, or 3 to change the group you'd like to talk to.",
+];
+/** Spells: an Evan's charged ones (held up to 1s), Element Amplification by job line, Element Composition, an Evan's passives. */
+const EVAN_CHARGES = new Set([22121000, 22151001]), AMPLIFIERS = [2110001, 2210001, 12110001, 22150000];
+const FP_COMPOSITION = 2111006, IL_COMPOSITION = 2211006, DRAGON_SOUL = 22000000, EVAN_MAGIC_MASTERY = 22170001, CRITICAL_MAGIC = 22140000;
 /** Explosion winds up in its prepare pose before it goes off. */
 const EXPLOSION = 2111002;
 /**
@@ -366,7 +393,7 @@ const CORKSCREWS = new Set([5101004, 15101003]), CHARGE_BLOWS = new Set([...CORK
  */
 const GRENADE_SPEED = 0.6, GRENADE_REUSE = 1000, GRENADE_LIFE = 3000, GRENADE_HIT = 120;
 /** Heal heals the party and strikes the undead in its box. */
-const HEAL = 2301002;
+const HEAL = 2301002, RESURRECTION = 2321006;
 /** Attack spells need the ground (or water), except Heal and Explosion. */
 const AIR_SPELLS = new Set([HEAL, EXPLOSION]);
 /**
@@ -509,6 +536,13 @@ const CHARGED_BLOW = 1211002, ADVANCED_CHARGE = 1220010, HEAVENS_HAMMER = 122101
  * for 2s. Another player's shakes you less the farther they are (400 less the distance, up to 400px).
  */
 const SHOUT = 1111008;
+/** Wedding rings, the reservation receipts, the Parent's Blessing, the Officiator's Permission and the Admin's Candle: never dropped. */
+const NO_DROP_WEDDING = new Set([1112803, 1112806, 1112807, 1112809, 4031481, 4031376, 4031480, 4031375, 4031373, 4031374, 3994085]);
+/**
+ * Bosses whose body going (once its death is over) shakes the screen: [px, how much longer than the usual 2s it
+ * lasts without easing, even with SHAKE UP off]. Zakum's third body and Balrog only with the option on.
+ */
+const BOSS_SHAKES = { 8800002: [30, 0, false], 8810026: [10, 4000, true], 8810018: [5, 3000, true], 8830003: [10, 3000, false] };
 const SHAKERS = new Set([SHOUT, 1311006, 9001001, 1009, 10001009, 20001009, 20011009, 1020, 10001020, 20001020, 20011020]);
 /** BuffStat.MORPH (second mask): transformed by a morph potion or skill. */
 const MORPH = 0x2n, GHOST_MASK = 0x20000n;
@@ -548,7 +582,7 @@ const WEAPON_IMMUNE = 0x40000, MAGIC_IMMUNE = 0x80000, immuneTo = (m, bit) => !!
 const HARD_SKIN = 0x200000, guarded = (m) => !!(m?.status?.second & 0x80000000) && !!m.guardValue;
 const takenPct = (m) => (m?.status?.first & 0x4 ? Number(m.takenPct) || 0 : 0);
 // another player's level up, job change, quest clear, monster card and item level up, heard in full
-const FOREIGN_SOUND = { 0: 'Game/LevelUp', 8: 'Game/JobChanged', 9: 'Game/QuestClear', 0x0d: 'Game/mCardGet', 0x0f: 'Game/ItemLevelUp' };
+const FOREIGN_SOUND = { 0: 'Game/LevelUp', 7: 'Game/Portal', 8: 'Game/JobChanged', 9: 'Game/QuestClear', 0x0d: 'Game/mCardGet', 0x0f: 'Game/ItemLevelUp' };
 // Grenade and Poison Bomb make no weapon swing; Grenade's throw is Use2; Blast's cast follows the charge on the weapon
 const GRENADE = 5201002, POISON_BOMB = 14111006, BLAST = 1221009, NO_SWING = new Set([GRENADE, POISON_BOMB]);
 // thrown and charged as Grenade (Poison Bomb's reuse is 1.5s)
@@ -591,7 +625,9 @@ const RIDE_SHIP_SKILLS = new Set([5201002, 5201003, 5211001, 5211002, 5211004, 5
   14111006, 21121008, 22171004]);
 /** A tired mount: tiredness at least (level / 3) x 10 + 95 (checked on SET_TAMING_MOB_INFO / SPAWN_PLAYER). */
 const mountTired = (level, tired) => tired >= Math.floor(level / 3) * 10 + 95;
-const FLASH_JUMPS = new Set([4111006, 14101004]), FLASH_JUMPS_NW = 14101004;
+const FLASH_JUMPS = new Set([4111006, 14101004]), FLASH_JUMPS_NW = 14101004, SOUL_RUSH = 11101005, COMBAT_STEP = 21001001;
+/** Soul Rush's and Combat Step's time (ms) from one use to the next. */
+const SOUL_RUSH_REUSE = 1500, COMBAT_STEP_REUSE = 1000;
 /** Shadow Shifter by job (Night Lord, Shadower); Meso Guard; Chakra. */
 /** How much movement (ms) gathers before it goes to the server, as the client does. */
 const MOVE_FLUSH = 500;
@@ -607,13 +643,28 @@ const HEROS_WILLS = new Set([1121011, 1221012, 1321010, 2121008, 2221008, 232100
  */
 const SKILL_SWAPS = { 5001003: 5210000, 5211001: 5220002, 5211006: 5220011 }, SWAPPED_IN = new Set(Object.values(SKILL_SWAPS));
 /**
+ * Double and Triple Swing strike as Over Swing's hidden swings once it is learned, else Full Swing's: their own
+ * damage, reach, cost and poses, at Over / Full Swing's level.
+ */
+const ARAN_SWINGS = { 21000002: [[21120002, 21120009], [21110002, 21110007]], 21100001: [[21120002, 21120010], [21110002, 21110008]] };
+/**
  * How long after an attack's pose ends it can be used again (ms): Double Uppercut and Dragon Strike only after
  * striking something; Grenade from when it is thrown.
  */
-const REUSE = { 5101003: 1000, 5121001: 400, 5121005: 500, 5121007: 400, 15111004: 400, 5201006: 2000, 5211004: 450, 5211005: 450 };
+const REUSE = { 5101003: 1000, 5121001: 400, 5121005: 500, 5121007: 400, 15111004: 400, 5201006: 2000, 5211004: 450, 5211005: 450, 4121008: 500, 13101005: 400 };
 const REUSE_ON_HIT = new Set([5101003, 5121001]);
 /** Dash, Transformation and Super Transformation are refused, with a notice, where the map forbids movement skills. */
-const MOVE_LIMITED_SAY = new Set([5001005, 15001003, 5111005, 15111002, 5121003]);
+const MOVE_LIMITED_SAY = new Set([5001005, 15001003, 5111005, 15111002, 5121003, 13111005, 1014, 10001015]);
+/**
+ * The spells Element Amplification covers (their MP cost x its x%): the fire / poison and ice / lightning mages', the
+ * Blaze Wizard's and the Evan's attack spells.
+ */
+const AMPLIFIED = new Set([2001004, 2001005, 2101004, 2101005, 2111002, 2111003, 2111006, 2121001, 2121003, 2121006, 2121007,
+  2201004, 2201005, 2211002, 2211003, 2211006, 2221001, 2221003, 2221006, 2221007, 12001003, 12101002, 12101006, 12111003, 12111005, 12111006,
+  22001001, 22101000, 22111000, 22121000, 22131000, 22151001, 22171002, 22171003, 22181001]);
+/** Three Snails, and the skills that say "This skill cannot be used with the equipped item." for the wrong weapon. */
+const THREE_SNAILS = new Set([1000, 10001000, 20001000, 20011000]), EQUIPPED_ITEM_SAY = new Set([11101004, 11111006, 12101006, 12111005, 12111006]);
+const MYSTIC_DOOR = 2311002, SMOKESCREEN = 4221006;
 const DASHES = [5001005, 15001003];
 const SHIFTERS = { 412: 4120002, 422: 4220002 }, MESO_GUARD = 4211005, CHAKRA = 4211001, MESO_EXPLOSION = 4211006;
 /** Shadow Partner (Hermit, Night Walker) and its buff bit (second mask). Taunt and Vampire don't get its throws. */
@@ -818,6 +869,9 @@ const mobDepth = (e) => {
 export class Game {
   /** net: ChannelSession when playing online, null for the offline map viewer. */
   constructor(canvas, assets, look, hooks = {}, net = null) {
+    // the Party Search kept with your session: 0 none, 1 searching, 2 paused; what it looks for; whether to take it up
+    // again on the next map (after a channel change or the Cash Shop)
+    this.partySearch = { state: 0, min: 0, max: 0, members: 0, mask: 0, restore: false };
     // (opaque: nothing shows through the game, so the browser needn't blend it with the page behind)
     this.canvas = canvas; this.ctx = snapToPixels(canvas.getContext('2d', { alpha: false }));
     this.frames = frameMaker; frameMaker.start();   // frames made ahead of use are made off the page's thread, where the browser can
@@ -825,7 +879,8 @@ export class Game {
     this.ctx.imageSmoothingEnabled = false;
     this.assets = assets; this.look = look; this.hooks = hooks; this.net = net;
     this.input = new Input(canvas);
-    this.input.filter = (k, down) => (down && !!this.fieldMode?.key?.(k)) || this.dojoKey(k, down);   // the Carnival window's Tab / F1-F12 first
+    this.input.filter = (k, down) => (down && !!this.fieldMode?.key?.(k)) || this.dojoKey(k, down)
+      || (down && !!this.windows?.keyHolder && !['left', 'right', 'up', 'down'].includes(k));   // a window with the keyboard (SkillUp)   // the Carnival window's Tab / F1-F12 first
     this.controls = loadControls();          // controller and touch layouts, kept in this browser
     this.padInput = new PadInput(this.input, () => this.controls?.padMove || 'ls');
     this.cam = { x: 0, y: 0, w: VIEW_W, h: VIEW_H };
@@ -878,6 +933,9 @@ export class Game {
     let swipe = null, lastTap = null, synthDbl = -1e9;
     addEventListener('pointerdown', (e) => {
       if (e.pointerType !== 'touch') { swipe = null; return; }
+      // a finger on the page's own controls (MOBILE UI's panels, the touch controls) isn't on the field: it neither
+      // swipes what is under it nor counts towards a double tap there
+      if (e.target !== c) { swipe = null; lastTap = null; return; }
       const [x, y] = at(e);
       swipe = { x, y, last: y, on: false, cx: e.clientX, cy: e.clientY, t: performance.now(), ui: !!(wm.top(x, y) || sb.contains(x, y)) };
     }, true);
@@ -966,10 +1024,32 @@ export class Game {
    * CHANGE_CHANNEL: the server answers with the new channel's address; the client then drops this
    * connection and logs the same character in there (PLAYER_LOGGEDIN), keeping its handlers.
    */
+  /**
+   * First the client's checks: no request waiting on its answer (alive, 500ms since the last), not out of breath (a
+   * GM aside), not where the map forbids it (fieldLimit 0x10). The request holds the request lock, and the server
+   * turning it down (actions enabled again) just ends the wait.
+   */
   async switchChannel(ch) {
-    if (ch === this.channel) return;
-    await this.hop((net) => net.changeChannel(ch), 'Changing channel...', 'You cannot change channels right now.');
+    if (ch === this.channel || this.switching || !this.net) return;
+    if (!this.canExclusive(500)) return;
+    if (!this.gm && this.outOfBreath()) { this.windows.notice("You can't do it right now.\r\nCatch your breath and then try again."); return; }
+    if ((this.map?.info?.fieldLimit || 0) & 0x10) { this.windows.notice("You can't do it here in this map."); return; }
+    this.lockExclusive();
+    await this.hop((net) => net.changeChannel(ch), 'Changing channel...', null);
   }
+  /** The status bar's Channel button: its window, except where the map forbids changing channel (fieldLimit 0x10). */
+  channelMenu() {
+    const open = this.windows.isOpen('channel') || this.mobileHud?.sheets?.kind === 'channel';
+    if (!open && (this.map?.info?.fieldLimit || 0) & 0x10) { this.windows.notice("You can't do it here in this map."); return; }
+    if (this.mobileHud?.openSheet('channel')) return;   // MOBILE UI: its own sheet
+    this.windows.toggle('channel');
+  }
+  /**
+   * Out of breath: for 5s after a blow that did damage, a Hurricane or Rapid Fire shot, or a skill starting to charge
+   * or wind up, the channel and the Cash Shop / MTS can't be changed to.
+   */
+  catchBreath() { this.breathUntil = performance.now() + 5000; }
+  outOfBreath() { return performance.now() < (this.breathUntil || 0); }
   /** Leaving the Cash Shop is the same hop: the server sends the channel's address and we log back in there. */
   async leaveCashShop() {
     if (!this.inCashShop) return;
@@ -1063,13 +1143,27 @@ export class Game {
     to.searchParams.set('b', Date.now().toString(36));
     location.replace(to);
   }
-  enterCashShop() { if (this.net && !this.inCashShop) this.net.enterCashShop(); }
   /**
-   * The status bar's MTS button: ENTER_MTS, one request at a time (500ms apart, none waiting for its answer), and not
-   * where the map forbids it (fieldLimit 0x10). The game server with the MTS off answers with enableActions.
+   * The Cash Shop button: not out of breath (GMs neither), no request waiting on its answer (500ms since the last),
+   * not where the map forbids it (fieldLimit 0x10); the request holds the request lock until it's answered.
+   */
+  enterCashShop() {
+    if (!this.net || this.inCashShop) return;
+    if (this.outOfBreath()) { this.windows.notice("You can't do it right now.\r\nCatch your breath and then try again."); return; }
+    if (!this.canExclusive(500, true)) return;
+    if ((this.map?.info?.fieldLimit || 0) & 0x10) { this.windows.notice("You can't do it here in this map."); return; }
+    this.net.enterCashShop();
+    this.lockExclusive();
+  }
+  /**
+   * The status bar's MTS button: ENTER_MTS, not out of breath, one request at a time (500ms apart, none waiting for its
+   * answer), and not where the map forbids it (fieldLimit 0x10). The game server with the MTS off answers with
+   * enableActions.
    */
   enterMTS() {
-    if (!this.net || this.inCashShop || !this.canExclusive(500, true)) return;
+    if (!this.net || this.inCashShop) return;
+    if (this.outOfBreath()) { this.windows.notice("You can't do it right now.\r\nCatch your breath and then try again."); return; }
+    if (!this.canExclusive(500, true)) return;
     if ((this.map?.info?.fieldLimit || 0) & 0x10) { this.windows.notice("You can't do it here in this map."); return; }
     this.net.enterMTS();
     this.lockExclusive();
@@ -1077,6 +1171,7 @@ export class Game {
   /** SET_CASH_SHOP: the server took us off the map; swap the world for the shop screen. */
   openCashShop(d) {
     this.inCashShop = true;
+    this.releaseExclusive();   // the answer to the request
     const info = d.info;
     if (info) { Object.assign(this.stats, info.stats); this.inventory = info.inventory; this.meso = info.meso; this.rings = info.rings; this.newYearCards = info.cards || []; this.myCards = this.newYearCards.map((c) => c.id); this.warmAmmoInfo(); }
     this.others.clear(); this.clearDrops(); this.pets.clear(); this.lifeByOid.clear(); this.summons.clear(); this.dragons.clear(); this.boards.clear(); this.kites.clear(); this.jukebox = null; clearTimeout(this.jukeboxTimer); this.reactors?.clear();
@@ -1089,6 +1184,7 @@ export class Game {
     this.showChatBox(false);
     this.weather.stop(false); this.skillLoop?.stop(); this.skillLoop = null;   // nothing of the map plays on in the shop
     music.play('BgmUI/ShopBgm', { fadeOut: 0, fadeIn: 0 });   // a cut, no fade
+    setWholeScreen(true); this.setResolution();   // all 800x600 of it, as large as fits the window (and no touch controls)
     this.csWin = this.windows.show(new CashShopWin(this.windows, d), null);
   }
   /** The status bar's chat line is a page element over the canvas: hide it while the shop screen is up. */
@@ -1101,11 +1197,12 @@ export class Game {
     try {
       const addr = await new Promise((resolve) => {
         old.h.changeChannel = resolve;
+        this.hopRefused = () => resolve(null);   // turned down: the server enables actions again
         request(old);
         setTimeout(() => resolve(null), 8000);
       });
-      old.h.changeChannel = null;
-      if (!addr) { await this.windows.notice(refused); return; }
+      old.h.changeChannel = null; this.hopRefused = null;
+      if (!addr) { if (refused) await this.windows.notice(refused); return; }
       const h = old.h;
       old.h = {};                       // the old connection closes quietly
       old.close();
@@ -1118,7 +1215,8 @@ export class Game {
       this.setServerTime(entered.serverTime);
       const info = entered.info;
       if (info) { Object.assign(this.stats, info.stats); this.inventory = info.inventory; this.meso = info.meso; this.rings = info.rings; this.newYearCards = info.cards || []; this.myCards = this.newYearCards.map((c) => c.id); this.warmAmmoInfo(); }
-      if (fromCashShop) { this.inCashShop = false; if (this.csWin) this.windows.close(this.csWin); this.csWin = null; music.stop(600); }
+      if (fromCashShop) { this.inCashShop = false; if (this.csWin) this.windows.close(this.csWin); this.csWin = null; music.stop(600); setWholeScreen(false); this.setResolution(); }
+      this.partySearch.restore = true;   // a search that was on is taken up again on the new channel
       const loaded = this.changeMap(entered.mapId, { portalIdx: entered.portal });
       net.flush();
       await loaded;
@@ -1126,7 +1224,10 @@ export class Game {
       // the server comes back without your item effect: put it back on (or off, if the item is gone)
       const fx = this.player.itemFxId;
       if (fx) { if (this.itemCount(fx)) net.useItemEffect(fx); else this.setItemEffect(this.player, 0); }
-      if (fromCashShop) { this.windows.open('minimap'); this.showChatBox(true); }
+      if (fromCashShop) {
+        if (settings.mobileUi) this.miniByMobileUi = true; else this.windows.open('minimap');   // (MOBILE UI has its own)
+        this.showChatBox(true);
+      }
       if (this.stats.hp <= 0 && (!this.dead || !this.death)) this.die(false);   // still dead after the switch (or the Cash Shop)
     } catch (e) {
       console.error(e);
@@ -1203,7 +1304,7 @@ export class Game {
       if (!tpl) return;
       const water = !!this.map?.swimming(ent.x, ent.y);
       if ((tpl.type === 0 && water) || (tpl.type === 1 && !water)) return;
-      if (local) { if (this.player.seat) this.standUp(false); } else ent.chair = 0;
+      if (local) this.leaveSeat(); else ent.chair = 0;
     }
     const prev = ent.morph || 0;
     if (prev === id && !ent.morphView?.dropped) return;
@@ -1241,6 +1342,7 @@ export class Game {
     const prev = ent.ghost || 0, local = ent === this.player;
     if (prev === v) return;
     ent.ghost = v;
+    if (local && v) this.leaveSeat();   // becoming a ghost puts you off your seat, with nothing sent
     const look = local ? this.look : ent.look;
     if (look) look.ghost = v;
     if (v === 1) { if (ent.fxBeforeGhost === undefined) ent.fxBeforeGhost = ent.itemFxId || 0; this.setItemEffect(ent, 5010999); }
@@ -1843,7 +1945,7 @@ export class Game {
       || (type === 553 ? this.useCashBare : null)
       || (Math.floor(id / 1000) === 5281 ? this.useEffectCash : null);
     if (!run) return false;
-    if (this.cashFree()) run.call(this, Number(slot), id);
+    if (this.cashGate()) run.call(this, Number(slot), id);   // refused: "Other requests are in process", as the client says
     return true;
   }
   /**
@@ -1907,9 +2009,13 @@ export class Game {
    * sealed; notExtend refused) it asks with the time it adds, held to the item's maxDays from now.
    */
   async useSandglass(slot, id, pos = 0) {
-    if (!pos) { this.sendCashItem(slot, id, (w) => w.short(0)); return; }
+    // the client checks for a request waiting on its answer when the sandglass goes, and then holds the lock itself
+    const send = (at) => {
+      if (!this.canExclusive(500)) { this.windows.notice('Other requests are in process.\r\nPlease try again in a little bit.'); return; }
+      if (this.sendCashItem(slot, id, (w) => w.short(at))) this.lockExclusive();
+    };
+    if (!pos) { send(0); return; }
     if (this.dead) { this.windows.notice("You can't do it once you're dead."); return; }
-    if (!this.canExclusive(500)) return;
     const it = this.inventory?.equipped?.[pos], glass = this.inventory?.[5]?.[slot];
     if (!it) return;
     if (glass?.flag & 1) { this.windows.notice('Sealed items cannot be\r\nsold, traded, or dropped.'); return; }
@@ -1923,7 +2029,7 @@ export class Game {
     const d = Math.floor(add / 86400), h = Math.floor((add % 86400) / 3600), m = Math.floor((add % 3600) / 60);
     const dur = `${d > 0 ? `${d} days` : ''}${h > 0 ? `${h} hrs.` : ''}${m > 0 ? `${m} min.` : ''}`;
     if (!(await this.windows.confirm(`When used on ${this.windows.itemName(it.id) || ''},  the effective date will be extended by ${dur}. Would you like to use it?`))) return;
-    this.sendCashItem(slot, id, (w) => w.short(pos));
+    send(pos);
   }
   async openKarma(slot, id) {
     if (this.tradeOpen()) { this.hud.message('Not available', CHAT_COLOR.error); return; }
@@ -2408,6 +2514,7 @@ export class Game {
     if (!this.hud) return;
     const chatKey = CHAT_KEYS[m];
     if (chatKey) { if (chatKey === 'toggle') this.statusBar?.toggleChat(); else this.statusBar?.openChat(chatKey); return; }
+    if (settings.mobileUi && this.mobileHud?.sheet(m)) return;   // MOBILE UI: its sheets for these windows (Messenger: its panel over the window)
     if (m === MENU.ITEMS) this.windows.toggle('inventory');
     else if (m === MENU.EQUIP) this.windows.toggle('equip');
     else if (m === MENU.STATS) this.windows.toggle('stat');
@@ -2448,7 +2555,7 @@ export class Game {
    * chairs, cash pet food and morphs. The first stack of it that isn't sealed is used.
    */
   async useItemById(id) {
-    if (this.hidden() || this.dead || !this.canExclusive(200)) return;
+    if (this.hidden() || this.dead || !this.canExclusive(200) || this.seduceInput()) return;
     const type = Math.floor(id / 10000);
     const bag = Math.floor(id / 1000) === 2109 || id === 2100067;
     if (!PLAIN_USE.has(type) && ![212, 524, 301, 530, 226, 227].includes(type) && !bag) return;
@@ -2733,18 +2840,24 @@ export class Game {
     pet.react(type, action, text, balloon);
     if (pet.mine && type !== 3 && this.net) this.net.petChat(pet.sn, type, action >= 9 ? action : 0, text);
   }
-  /** /pet <text>: pets that know slang answer it (level 15 on); the others repeat it (over level 14). */
-  petTalk(text) {
-    if (typeof this.petDialog !== 'object' || !this.petDialog) return;
+  /**
+   * /pet <text>: each pet of level 15 or more repeats a clean line; a line with a word from Etc/Curse.img in it (looked
+   * for with spaces and _-:^.,*\/;!'"`+ taken out) gets each one's slang answer instead (one not busy acting, with a
+   * slang entry for its level), never the line itself.
+   */
+  async petTalk(text) {
+    await this.maskCurses('');
+    const bare = text.replace(/[ _\-:\t^.,*\/;!'"`+]/g, '').toLowerCase();
+    const curse = (this.curses || []).some((w) => bare.includes(w));
     for (const pet of this.myPets()) {
       const lv = this.petLevel(pet);
       if (!pet.data || lv < 15) continue;
-      if (pet.data.slang) {
-        if (pet.forced) continue;
-        const e = Object.values(pet.data.slang).find((s) => s && lv >= s.l0 && lv <= s.l1);
-        const { act, text: line } = pickReaction(e ? { 0: e } : null, this.petDialog, pet.id);
-        if (act || line) this.petSay(pet, 2, act ? pet.actionIndex(act) : -1, line);
-      } else this.petSay(pet, 2, -1, text);
+      if (!curse) { this.petSay(pet, 2, -1, text); continue; }
+      if (pet.forced || typeof this.petDialog !== 'object' || !this.petDialog) continue;
+      const e = Object.values(pet.data.slang || {}).find((s) => s && lv >= s.l0 && lv <= s.l1);
+      if (!e) continue;
+      const { act, text: line } = pickReaction({ 0: e }, this.petDialog, pet.id);
+      if (act || line) this.petSay(pet, 2, act ? pet.actionIndex(act) : -1, line);
     }
   }
   /** Standing about: an idle line from randAction (whatever its level). */
@@ -2869,10 +2982,11 @@ export class Game {
   }
 
   /**
-   * A monster's blow is what sets the pet's potions off: HP is checked against what the blow will take from it, and a
-   * blow that also went elsewhere (Power Guard's reflected share, Meso Guard's share paid in mesos, Magic Guard's share
-   * to MP: flag 1, 2 or 4, the first that applies) starts the MP checks, which then run on every stat update until an
-   * MP potion goes. Spending HP / MP on skills sets off nothing. meso: the share Meso Guard took (already off damage).
+   * A blow (a monster's, a trap's or an obstacle's) sets the pet's potions off: HP is checked against what the blow will
+   * take from it, and a blow that also went elsewhere (Power Guard's reflected share, Meso Guard's share paid in mesos,
+   * Magic Guard's share to MP: flag 1, 2 or 4, the first that applies) starts the MP checks. So does any skill that goes
+   * off. Once started, MP is checked every frame and on every stat update until an MP potion goes. m: the monster (none
+   * for a trap); meso: the share Meso Guard took (already off damage).
    */
   petHitPots(m, damage, from, meso = 0) {
     const now = Date.now(), on = (ids) => ids.find((id) => this.buffs?.some((b) => b.source === id && b.until > now));
@@ -2894,38 +3008,65 @@ export class Game {
   }
   /**
    * Auto HP / MP Potion Pouch: the lead pet drinks the set potion when HP (MP) is under your alert setting (HP counting
-   * the blow just taken), at most every 200ms. Without one left it says so.
+   * the blow just taken). Without one left it says so (and the pet does, its first three times; an HP potion that goes
+   * lets it say so again). A pouch potion is a request like the others: none goes while another waits for its answer,
+   * and it then holds them back until its own answer (the game server always gives one); it also waits 200ms from the
+   * last HP potion, the MP one too. On a map that forbids potions nothing goes.
    */
   petAutoPot(kind, pending = 0, flag = 0) {
     if (kind === 'mp' && !this.petMpArmed) return;
     const lead = this.myPets()[0], s = this.stats;
-    if (!lead || lead.slot !== 0 || !this.net || this.dead || !s || s.hp <= 0) return;
+    if (!lead || lead.slot !== 0 || !this.net || !s) return;
     if (!this.petFlags(lead)[kind === 'hp' ? 'consumeHP' : 'consumeMP']) return;
-    const max = kind === 'hp' ? this.maxHpShown() : this.maxMpShown(), alert = settings[`${kind}Alert`];
-    if (!alert || !max || ((kind === 'hp' ? s.hp - pending : s.mp) * 100) / max >= alert * 100) return;
+    if (this.seduceInput()) return;   // not while seduced
+    const max = kind === 'hp' ? this.maxHpShown() : this.maxMpShown(), alert = Math.round((settings[`${kind}Alert`] || 0) * 100);
+    if (!alert || !max || ((kind === 'hp' ? s.hp - pending : s.mp) * 100) / max >= alert) return;
     const id = this.petPotions?.[kind];
-    if (!id || (this.map?.info?.fieldLimit || 0) & 0x400) return;
+    if (!id) return;
     const slot = Object.entries(this.inventory?.[2] || {}).find(([, it]) => it.id === id)?.[0];
     const said = (this.petPotSaid ??= { hp: 0, mp: 0 });
     if (!slot) {
-      this.notice(`You are lacking the ${kind === 'hp' ? 'HP' : 'MP'} Potion that your pet is supposed to use.`);
       if (said[kind] < 3) { said[kind]++; this.petEvent(kind === 'hp' ? 'e_NOHPPotion' : 'e_NOMPPotion'); }
+      this.hud.message(`You are lacking the ${kind === 'hp' ? 'HP' : 'MP'} Potion that your pet is supposed to use.`, CHAT_COLOR.error);   // every time
       return;
     }
-    const t = (this.petPotT ??= { hp: 0, mp: 0 }), now = performance.now();
-    if (now - t[kind] < 200) return;
+    if (kind === 'hp') said.hp = 0;   // a potion found lets the pet say so again, whether or not it goes now
+    if ((this.map?.info?.fieldLimit || 0) & 0x400 || this.excl?.busy || (kind === 'hp' && s.hp <= 0)) return;
+    const t = (this.petPotT ??= { hp: -Infinity, mp: -Infinity }), now = performance.now();
+    if (now - t.hp < 200) return;
     t[kind] = now;
     this.net.petAutoPot(lead.sn, Number(slot), id, flag);
+    this.excl = { busy: true, at: this.excl?.at ?? -Infinity };   // until the server's answer
     sfx.play(`Item/${pad(id, 8)}/Use`);
     if (kind === 'mp') this.petMpArmed = false;
   }
-  /** Set the potion a pet drinks (dropped on PET HP / PET MP): the lead pet needs the pouch, the potion must restore it. */
+  /**
+   * Whether the lead pet wears the HP (MP) Potion Pouch; null while what it wears is still being read. No lead pet
+   * here: false.
+   */
+  petPouch(kind) {
+    const lead = this.myPets()[0];
+    if (!lead || lead.slot !== 0) return false;
+    const f = this.petFlags(lead);
+    return this.petFlagCache?.has(lead.slot) ? !!f[kind === 'hp' ? 'consumeHP' : 'consumeMP'] : null;
+  }
+  /** The pet's HP (MP) potion is let go: the server is told, and nothing is drunk until another is set. */
+  clearPetPotion(kind) {
+    if (!this.petPotions?.[kind] || !this.net) return;
+    this.net.petPotion(kind === 'hp' ? 1 : 2, 0);
+    this.petPotions[kind] = null;
+  }
+  /**
+   * Set the potion a pet drinks (dropped on PET HP / PET MP): the lead pet needs the pouch, the potion must restore it;
+   * the potion already set does nothing.
+   */
   async setPetPotion(kind, id) {
     const lead = this.myPets()[0];
     if (!lead || !this.petFlags(lead)[kind === 'hp' ? 'consumeHP' : 'consumeMP']) return false;
     const spec = await itemSpec(this.assets, id);
     const ok = kind === 'hp' ? Number(spec?.hp) || Number(spec?.hpR) : Number(spec?.mp) || Number(spec?.mpR);
     if (!ok) { this.windows.notice(`Only usable on Auto ${kind === 'hp' ? 'HP' : 'MP'} Potion Pouch.`); return false; }
+    if (this.petPotions?.[kind] === id) return false;
     this.net.petPotion(kind === 'hp' ? 1 : 2, id);
     (this.petPotions ??= {})[kind] = id;
     this.hud.message(`Your pet will consume the Potion once when your ${kind === 'hp' ? 'HP' : 'MP'} goes below ${kind === 'hp' ? 'HP' : 'MP'} alert setting.`, CHAT_COLORS.notice);
@@ -3005,6 +3146,7 @@ export class Game {
     this.touch = new TouchControls(this, uiRoot);
     this.statusBar.layout(UI_W, UI_H);
     await this.statusBar.load();
+    this.mobileHud = new MobileHud(this, uiRoot);   // System Option MOBILE UI's interface, in place of the bar
     this.windows = new WindowManager(this, this.statusBar);
     this.warmAmmoInfo();   // your ammo's attack counts from the first shot
     await this.windows.load();
@@ -3017,6 +3159,7 @@ export class Game {
     wm.confirm = (text) => new Promise((r) => wm.show(new UtilBox(wm, 'okcancel', text, r)));
     wm.okCancel = (text, kind = 'okcancel') => new Promise((r) => wm.show(new UtilBox(wm, kind, text, r)));
     wm.askWhisper = (def, names) => new Promise((r) => wm.show(new UtilBox(wm, 'whisper', 'Please enter the person you want to whisper to.', r, { def, names }), null));
+    wm.askGroup = (groups, def) => new Promise((r) => wm.show(new UtilBox(wm, 'group', 'Please select a group to whisper.', r, { groups, def }), null));
     wm.selectPet = (text, pets) => new Promise((r) => { const b = new PetSelectDialog(wm, text, pets, r); this.assets.preload(b.frames()).then(() => wm.show(b)); });
     // an amount: the same box with a number field (item names spelled out)
     wm.askNumber = (text, def, min, max) => new Promise((r) => wm.show(new UtilBox(wm, 'quantity', text.replace(/#t(\d+)#/g, (_, id) => wm.itemName(Number(id)) || ''), r, { def, min, max }), null));
@@ -3030,7 +3173,7 @@ export class Game {
     this.buddies = []; this.party = null; this.guild = null;
     this.assets.json('UI/GuildMark.img').then((m) => { this.guildMarks = m; });
     this.maskCurses('');   // loads the word list for incoming lines
-    this.windows.order.push(this.windows.wins.minimap); // the minimap starts open, under every window
+    if (!settings.mobileUi) this.windows.order.push(this.windows.wins.minimap); // the minimap starts open, under every window (MOBILE UI: its menu opens it)
     this.windows.fit(this.windows.wins.minimap);
     this.bindUiPointer();
     this.hud = new Hud(uiRoot, this);
@@ -3098,7 +3241,7 @@ export class Game {
       status: (s) => { this.hud.status(s); if (s.type === 'exp') this.widgets?.recordExp(s.amount, s.bonus); },
       notice: (n) => this.hud.notice(n),
       fame: (f) => this.onFame(f),
-      exclusiveAnswered: () => { this.releaseExclusive(); this.fieldMode?.win?.answered?.(); },
+      exclusiveAnswered: () => { this.releaseExclusive(); this.hopRefused?.(); this.fieldMode?.win?.answered?.(); },
       skillBookResult: (d) => this.onSkillBookResult(d),
       inventoryGrow: (type, limit) => { if (this.inventory) this.inventory.limits[type] = limit; },
       sortResult: (inv, mode) => this.windows?.wins.inventory?.setSortMode(inv, mode),
@@ -3197,7 +3340,7 @@ export class Game {
         const w = this.tradeWin = this.windows.show(new TradeWin(this.windows), null);
         w.slot = t.slot;
         if (t.partner) w.partnerJoined(t.partner, this.lookFrom(t.look)); else w.say('Waiting for the other player to accept...', '#555');
-        this.windows.open('inventory');
+        if (!this.mobileHud?.shown) this.windows.open('inventory');   // (MOBILE UI opens its own beside the trade)
       },
       // a guild alliance's invitation: refused at once with alliance invitations off in the Game Option or while
       // another is up; O takes it
@@ -3298,8 +3441,7 @@ export class Game {
         // a Party Search one is ignored with party or Party Search invitations off, or from someone on the Blacklist
         if (p.autoJoin) { if (this.optionAllowed('partyInvite') && this.optionAllowed('partySearch') && !this.windows.wins.userlist?.blacklisted(from)) this.net.partyOp(3, p.id); return; }
         if (!this.optionAllowed('partyInvite') || this.windows.wins.userlist?.blacklisted(from) || this.windows.order.some((w) => w.kind === 'party' || w.kind === 'partySearch')) { this.net.partyDeny(p.name); return; }
-        (from !== p.name ? notify(this.windows, 'partySearch', from) : notify(this.windows, 'party', p.name))
-          .then((ok) => (ok ? this.net.partyOp(3, p.id) : this.net.partyDeny(p.name)));
+        notify(this.windows, 'party', p.name).then((ok) => (ok ? this.net.partyOp(3, p.id) : this.net.partyDeny(p.name)));
       },
       partyMessage: (code, text) => {
         const t = code === 0x24 ? text || PARTY_ERROR : PARTY_MESSAGES[code] ?? PARTY_ERROR;
@@ -3603,7 +3745,7 @@ export class Game {
       }),
       portalSound: () => sfx.play('Game/Portal'),
       spawnNpc: later((n, controlled) => this.spawnLife('Npc', n, !!controlled)),
-      npcAction: later((oid, action, chat) => this.lifeByOid.get(oid)?.npcActed?.(action, chat)),
+      npcAction: later((oid, action, chat, start, moves) => this.lifeByOid.get(oid)?.npcActed?.(action, chat, start, moves)),
       forcedMapEquip: later(() => this.forceMapEquip()),
       forcedStats: (f) => { this.forcedStats = f; },
       // a change to what you wear, your buffs or skills: goes out with your next movement
@@ -3666,7 +3808,8 @@ export class Game {
         this.buffs = this.buffs.filter((x) => x.source !== b.source);
         if (BigInt.asUintN(64, BigInt(b.m2 ?? 0)) & BARRIER_MASK) this.after(0, () => this.barrierShield(this.player));
         this.buffs.push({ source: b.source, until: Date.now() + b.duration, dur: b.duration, m1: b.m1, m2: b.m2, hbHp: b.hbHp, hbMp: b.hbMp, sharpEyes: b.sharpEyes, speed: b.speed, jump: b.jump,
-          watk: b.watk, matk: b.matk, hands: b.hands, acc: b.acc, booster: b.booster, infusion: b.infusion, mapleWarrior: b.mapleWarrior, combo: b.combo, stance: b.stance, wdef: b.wdef, mdef: b.mdef, avoid: b.avoid });
+          watk: b.watk, matk: b.matk, hands: b.hands, acc: b.acc, booster: b.booster, infusion: b.infusion, mapleWarrior: b.mapleWarrior, combo: b.combo, stance: b.stance, wdef: b.wdef, mdef: b.mdef, avoid: b.avoid,
+          infinity: b.infinity, concentrate: b.concentrate });
       },
       cancelBuff: (m1, m2) => {
         if (BigInt.asUintN(64, BigInt(m1)) & RIDING_MASK) this.riding = null;
@@ -3749,6 +3892,7 @@ export class Game {
       }),
       direction: (path) => this.playDirection(path),
       lockUi: (on) => this.setUiLock(on),
+      warpUp: (free, idx) => this.warpUp(free, idx),
       objectStates: later((list) => { for (const { name, state } of list) this.setObjectState(name, state); }),
       energyCharge: (v) => { this.energy = v; this.energyOrb(); this.windows?.wins.energybar?.set(v); },
       aranCombo: (n) => this.setAranCombo(n),
@@ -3906,6 +4050,7 @@ export class Game {
     }
   }
   openQuest(id) {
+    if (this.mobileHud?.shown) { this.mobileHud.sheets.openQuest(id); return; }   // MOBILE UI: its Quests sheet
     const st = this.quests.status(id), w = this.windows.open('quest');
     if (!w) return;
     w.tab = st === 1 ? 1 : st === 2 ? 2 : 0; w.first = 0;
@@ -4113,6 +4258,34 @@ export class Game {
     else this.net.npcTalk(npc.oid, { x: Math.round(npc.x), y: Math.round(npc.y) });
   }
 
+  /**
+   * After a level-up: the first skill you have learned (in the order the client keeps them: by its id turned 5 bits
+   * right, modulo 31) whose CharLevel tiers include exactly the new level opens the SkillUp notice with that level and
+   * the skill's name, or rewrites the one already up. Only the Explorers' first-job attacks have tiers (10, 15, 20,
+   * 25); Evan skills are never looked at.
+   */
+  async skillUpNotice(level) {
+    const book = this.skills;
+    if (!book?.levels) return;
+    const order = (id) => (((id >>> 5) | (id << 27)) >>> 0) % 31;
+    const ids = Object.entries(book.levels).filter(([, v]) => (v?.level || 0) >= 1).map(([id]) => Number(id))
+      .filter((id) => Math.floor(id / 1000000) !== 22 && Math.floor(id / 10000) !== 2001)
+      .sort((a, b) => order(a) - order(b) || a - b);
+    for (const id of ids) {
+      const node = await book.ensure(id);
+      if (!Object.keys(node?.CharLevel || {}).some((k) => Number(k) === level)) continue;
+      const wm = this.windows;
+      let w = this.skillUpWin;
+      if (!w || !wm.order.includes(w)) {
+        w = this.skillUpWin = new SkillUpNotice(wm);
+        await this.assets.preload(w.frames());
+        wm.show(w, null);
+        wm.keyHolder = w;   // it takes the keyboard as it opens (not when it is only rewritten)
+      }
+      w.set(level, book.name(id));
+      return;
+    }
+  }
   onStats(s, enable) {
     if (!this.stats) return;
     if (enable) { this.apPending = false; this.scriptPending = 0; this.cashBusy = false; this.pickupAnswered(); }
@@ -4128,6 +4301,7 @@ export class Game {
       this.levelUpEffect(); sfx.play('Game/LevelUp');
       if (s.level < 11) this.statusBar?.blinkTab(2);   // the Stat tab blinks
       this.partyQuestInvites(s.level); this.refreshQuestBlink();
+      this.skillUpNotice(s.level);
     }
     if (s.level === 2 && before === 1) this.skillGuide();
     if (s.job !== undefined) {
@@ -4277,11 +4451,13 @@ export class Game {
 
   // ------------------------------------------------------------------ map
   async changeMap(id, { portal = null, portalIdx = null, pos = null } = {}) {
+    this.petPotSaid = { hp: 0, mp: 0 };   // the pet's "no potions" lines start again on each map
     if (this.loading && this.loadingId === id) return;
     // A newer SET_FIELD can arrive while a map is still loading: only the latest load wins.
     const seq = this.loadSeq = (this.loadSeq || 0) + 1;
     const current = () => seq === this.loadSeq;
     this.petMpArmed = false;
+    this.releaseExclusive();   // (a request still waiting on its answer is let go, and the next one spaced from here)
     this.loading = true; this.loadingId = id; this.objVisQueue = null;
     // a scene ends with its map; the next map's scene comes while that one loads
     this.direction = null;
@@ -4364,6 +4540,7 @@ export class Game {
       const q = this.queue; this.queue = [];
       for (const fn of q) fn();
       this.questAlert?.refresh();   // what this map, your items and your level offer
+      if (this.net) this.partySearchEntered();
     }
   }
 
@@ -4423,10 +4600,11 @@ export class Game {
       e.onPath = (m, start, moves, activity = -1) => { if (m.controlled && !m.dying && this.net) { this.net.moveMob(m.oid, start, moves, activity, 0, 0, m.flying ? m.fly : null); m.moveWait = true; } };
     }
     // an NPC we control asks the server what it does next, and does what comes back
-    if (kind === 'Npc' && controlled) e.onNpcAction = (n, action, chat) => this.net?.npcAction(n.oid, action, chat);
+    if (kind === 'Npc' && controlled) e.onNpcAction = (n, action, chat, start, moves) => this.net?.npcAction(n.oid, action, chat, start, moves);
     if (entry.newSpawn) { e.appear(); if (kind === 'Mob') sfx.play(`Mob/${pad(Number(d.id), 7)}/Regen`, { volume: this.volumeAt(e.x, e.y) }); }
     if (kind === 'Mob') {
       e.team = d.team || 0;
+      if (d.appear === -4 && Number(d.id) === 8800000) this.shakeScreen(30, false);   // Zakum's body coming in
       const ap = entry.appearAs;
       if (ap?.type >= 0) this.summonAppear(e, ap.type, ap.option);
       // -3: hidden until its parent (a part of the same boss) has finished dying
@@ -4546,6 +4724,12 @@ export class Game {
     }
     this.finishKill(e, anim);
   }
+  /** A monster gone after dying, vanishing or being swallowed (leave types 0, 1 and 3): some bosses shake the screen (BOSS_SHAKES). */
+  bossGone(e) {
+    if (e.kind !== 'Mob' || !(e.leaveType < 2 || e.leaveType === 3)) return;
+    const s = BOSS_SHAKES[Number(e.spawn?.id)];
+    if (s) this.shakeScreen(s[0], false, 0, s[1], s[2]);
+  }
   /** A blow landing on e: its last line shows `last` ms from now, and e can't die before then. */
   linesLanded(e, last) { e.linesUntil = Math.max(e.linesUntil || 0, performance.now() + last); }
   finishKill(e, anim = e.queuedKill?.anim) {
@@ -4554,6 +4738,7 @@ export class Game {
     this.releaseDrops(e);
     if (anim && e.kind === 'Mob') sfx.play(`Mob/${pad(Number(e.spawn.id), 7)}/Die`, { volume: this.volumeAt(e.x, e.y) });
     if (e.kind === 'Mob' && Number(e.spawn.id) === this.vfx?.boss?.oid) this.vfx.boss = null; // the gauge goes with its boss
+    e.leaveType = anim ?? 0;   // how it went (see bossGone)
     if (anim) e.kill(anim); else e.removed = true;
   }
 
@@ -4860,8 +5045,8 @@ export class Game {
         if (op.pos < 0 || op.to < 0) lookChanged = true;
       } else if (op.mode === 3) {
         const gone = box(op.inv, op.pos)[op.pos], chair = this.player.seat?.item;
-        // the last chair you sit on taken away: you stand up
-        if (chair && gone?.id === chair && Object.values(inv[op.inv] || {}).filter((it) => it?.id === chair).length === 1) this.standUp();
+        // the last chair you sit on taken away: you ask to stand up
+        if (chair && gone?.id === chair && Object.values(inv[op.inv] || {}).filter((it) => it?.id === chair).length === 1) this.askStandUp(0);
         delete box(op.inv, op.pos)[op.pos];
         if (op.pos < 0) lookChanged = true;
       }
@@ -4979,7 +5164,7 @@ export class Game {
   useInventoryItem(tab, slot, it) {
     if (this.dead) { this.windows.notice("You can't do it once you're dead."); return; }
     if (tab === 5 && it.id === 5170000) { this.useNameTag(slot, it.id); return; }                  // Pet Name Tag
-    if (tab === 5 && it.id === 5180000) { if (this.cashFree()) this.net.waterOfLife(); return; }   // Water of Life: the fairy does the rest
+    if (tab === 5 && it.id === 5180000) { if (this.cashGate()) this.net.waterOfLife(); return; }   // Water of Life: the fairy does the rest
     if (tab === 5 && Math.floor(it.id / 10000) === 524) { this.useCashPetFood(slot, it.id); return; }
     if (tab === 5 && this.useCashTabItem(slot, it.id)) return;
     if (tab === 5 && it.id === 5060002) {
@@ -5364,31 +5549,50 @@ export class Game {
   }
 
   /**
-   * The most a summon may hit for, as the game server's SummonDamageHandler caps it (it flags anything above):
-   * magic ones (no pad) take 5% x mad of the base magic damage, others 7.7% x pad of your weapon's base
-   * damage (5.4% from 438 up). Rolled at most 95% of that.
+   * A summon's blow on monster m, as the client works it out: a physical one misses by your accuracy (x 0.7-1.3
+   * against its avoid), else (main stat x 0.7-1.0 x 2.5 + second stat) x the skill's pad% - DEX and STR, the Dawn
+   * Warrior's and Thunder Breaker's STR and DEX, the Wind Archer's DEX and STR, the Night Walker's LUK and DEX; a magic
+   * one (Elquines, Ifrit, Summon Dragon, Bahamut, Flame) misses by your magic accuracy (x 0.5-1.2), else (3.3 x a roll
+   * of magic x mastery to magic + INT / 2 + (0.058 x magic)^2) x its mad%, mastery being (the skill's x 5 + 10) x 0.9%.
+   * A guard stops either, immunity lets 1 through; then the monster's element and Bullseye. A monster with a fixed
+   * damage takes that instead; one hurt only by plain attacks, or only by other skills, takes nothing.
    */
-  /**
-   * A physical summon's blow (Octopus, Gaviota, Wrath of the Octopi): a miss by your accuracy as for your own blows,
-   * else (DEX x 0.7-1.0 x 2.5 + STR) x the skill's pad %. No weapon attack, defence, level gap or critical.
-   */
-  summonHitDamage(id, lv, m) {
-    const info = m.src?.info || {}, over = Math.max(0, (info.level || 0) - (this.stats?.level || 1));
-    if (this.accuracyMiss(info, over)) return 0;
-    const pad = Number(this.skills.levelData(id, lv)?.pad) || 0;
-    return Math.trunc(((this.totalStat('dex') * (0.7 + Math.random() * 0.3) * 2.5 + this.totalStat('str')) * pad) / 100);
-  }
-  summonMaxDamage(id, lv) {
-    const ld = this.skills.levelData(id, lv) || {}, s = this.stats;
-    let max;
-    if (!ld.pad) {
-      const ti = (s.int || 0) + this.equipStat('int'), matk = Math.max(14, ti + this.equipStat('matk'));
-      max = Math.floor(((matk - ti + Math.floor(0.1996049769 * ti ** 1.290631341)) * 107) / 100) * 0.05 * (ld.mad || 0);
+  summonDamage(sm, m) {
+    const info = m.src?.info || {}, sb = this.skills, ld = sb.levelData(sm.skill, sm.level) || {}, magic = MAGIC_SUMMONS.has(sm.skill);
+    const over = Math.max(0, (info.level || 0) - (this.stats?.level || 1)), num = (v) => Number(v) || 0, clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    const rand = (a, b) => { const lo = Math.min(a, b), hi = Math.max(a, b); return lo + Math.random() * (hi - lo); };
+    let d;
+    if (!magic) {
+      if (this.accuracyMiss(info, over) || guarded(m)) d = 0;
+      else if (immuneTo(m, WEAPON_IMMUNE)) d = 1;
+      else {
+        const job = this.stats?.job || 0, cyg = Math.floor(job / 1000) === 1 ? Math.floor((job % 1000) / 100) : 0;
+        const [main, second] = cyg === 1 || cyg === 5 ? ['str', 'dex'] : cyg === 3 ? ['dex', 'str'] : cyg === 4 ? ['luk', 'dex'] : ['dex', 'str'];
+        d = this.summonElement((this.totalStat(main) * (0.7 + Math.random() * 0.3) * 2.5 + this.totalStat(second)) * num(ld.pad) * 0.01, sm.skill, m);
+      }
     } else {
-      const base = this.maxDamage();
-      max = base * (base >= 438 ? 0.054 : 0.077) * ld.pad;
+      const INT = this.totalStat('int'), LUK = this.totalStat('luk'), acc = ((Math.floor(INT / 10) + Math.floor(LUK / 10)) * 5 * 100) / (over * 10 + 255);
+      if (rand(acc * 0.5, acc * 1.2) < clamp(info.eva || 0, 0, 999) || guarded(m)) d = 0;
+      else if (immuneTo(m, MAGIC_IMMUNE)) d = 1;
+      else {
+        const now = Date.now(), buff = Math.max(0, ...(this.buffs || []).filter((b) => b.matk && b.until > now).map((b) => b.matk));
+        const soul = sb.level(DRAGON_SOUL) ? num(sb.levelData(DRAGON_SOUL)?.mad) : 0;
+        const MAD = clamp(clamp(INT + this.equipStat('matk') + soul, 0, 1999) + buff, 0, 1999), k = (num(ld.mastery) * 5 + 10) * 0.009;
+        d = this.summonElement((rand(MAD * k, MAD) * 3.3 + INT * 0.5 + (MAD * 0.058) ** 2) * num(ld.mad) * 0.01, sm.skill, m);
+      }
     }
-    return Math.max(1, Math.floor(max * 0.95));
+    if (d > 1 && m === this.beaconMob && sb.level(BULLSEYE)) d *= (num(sb.levelData(BULLSEYE)?.x) + 100) * 0.01;
+    d = Math.trunc(d);
+    if (d > 0 && num(info.fixedDamage) > 0) d = num(info.fixedDamage);
+    const only = info.damagedBySelectedSkill && Object.values(info.damagedBySelectedSkill).map(Number);
+    if (num(info.onlyNormalAttack) || (only && !only.includes(sm.skill))) d = 0;
+    return d;
+  }
+  /** A summon's damage against m's element: its skill's element (weak x1.5, strong x0.5, immune x0). */
+  summonElement(d, skillId, m) {
+    const elem = String(this.skills.node(skillId)?.elemAttr || 'p').toUpperCase();
+    const a = Number(new RegExp(`${elem}(\\d)`).exec(m.src?.info?.elemAttr || '')?.[1]) || 0;
+    return a === 1 ? 0 : a === 2 ? d * 0.5 : a === 3 ? Math.min(Math.max(d, d * 1.5), 199999) : d;
   }
 
   /** A summon's blow landing: the monster flinches, the numbers show and attack1's hit art plays on it. */
@@ -5449,11 +5653,81 @@ export class Game {
     this.after(delay, () => { if (this.map === map) this.fx.push({ anim, follow: ent, flip: false }); });
   }
 
-  unequip(slot) {
-    const inv = this.inventory[1];
-    const limit = this.inventory.limits[1] || 24;
-    for (let s = 1; s <= limit; s++) if (!inv[s]) { this.net.moveItem(1, slot, s, 1); return; }
-    this.hud.message('Your equip inventory is full.', '#ff8080');
+  /**
+   * Take off what you wear in slot (negative) into equip slot `to`: the cell it was dropped on (0: none, nothing
+   * happens), or with null (a double-click, MOBILE UI's Take off) the first free one (none: nothing happens). Not
+   * with a shop-type window open, out of breath or dead (said), with a request still out, while the map holds your
+   * stats (said); the mount or saddle you are riding on calls the ride off instead. Onto a cell already taken the
+   * client would try a swap, which the game server never makes: nothing goes.
+   */
+  unequip(slot, to = null) {
+    if (this.tradeOpen() || !this.handsFree() || !this.canExclusive(500)) return;
+    const inv = this.inventory[1], limit = this.inventory.limits[1] || 24;
+    if (to === null) { to = 0; for (let s = 1; s <= limit; s++) if (!inv[s]) { to = s; break; } }
+    const it = this.inventory.equipped?.[slot];
+    if (!to || !it || this.rideFirst(it.id) || this.forcedRefusal('equipment') || inv[to]) return;
+    this.net?.moveItem(1, slot, to, -1);
+    this.lockExclusive();
+  }
+  /** Monster Rider for your job's branch: 1004, 10001004, 20001004 or 20011004. */
+  riderSkill() {
+    const job = this.stats?.job || 0, group = Math.floor(job / 100) === 22 || job === 2001 ? 2001 : Math.floor(job / 1000) * 1000;
+    return group * 10000 + 1004;
+  }
+  /** Riding a tamed monster, a mount or saddle (190xxxx / 191xxxx) taken off or dropped calls the ride off instead: true. */
+  rideFirst(id) {
+    if (Math.floor((this.riding?.item || 0) / 10000) !== 190 || ![190, 191].includes(Math.floor(id / 10000))) return false;
+    this.net?.cancelBuff(this.riderSkill());
+    return true;
+  }
+  /** Items can be handled: not out of breath (5s after a blow; unless only being dead counts) nor dead - else said. */
+  handsFree(breath = true) {
+    if (breath && this.outOfBreath()) { this.windows.notice("You can't do it right now.\r\nCatch your breath and then try again."); return false; }
+    if (this.dead) { this.windows.notice("You can't do it once you're dead."); return false; }
+    return true;
+  }
+  /**
+   * An item dragged onto the field, from the inventory (tab, slot) or from what you wear (tab 1, a negative slot), in
+   * the client's order: not with a shop-type window open; out of breath or dead (said); one request at a time; worn
+   * items stay on an everlast map; the mount you ride calls the ride off; wedding items stay; an engagement ring asks
+   * and breaks it off; cash items refuse; a quest item (unless it carries Karma's mark), an untradeable one and an
+   * account-sharable one ask first (on an everlast map quest and untradeable items just stay); sealed items refuse;
+   * a New Year card asks; then how many, for a stack of Use, Set-up or Etc that doesn't expire (not stars or bullets).
+   */
+  async dropItem(tab, slot) {
+    const worn = slot < 0, everlast = !!Number(this.map?.info?.everlast);
+    if (this.tradeOpen() || !this.handsFree() || !this.canExclusive(500)) return;
+    if (worn && everlast) return;
+    const it = worn ? this.inventory?.equipped?.[slot] : this.inventory?.[tab]?.[slot];
+    if (!it || this.rideFirst(it.id)) return;
+    const W = this.windows, id = it.id;
+    if (Math.floor(id / 10000) === 224 || NO_DROP_WEDDING.has(id)) return;
+    if (id >= 4031357 && id <= 4031364) {
+      const married = this.rings?.marriage?.status === 3;
+      if (await W.confirm(married ? 'You will not be able to receive the wedding ring.\r\nIs that okay?'
+        : 'Dropping this item will break your engagement.\r\nDo you still wish to drop this item?')) this.net?.breakEngagement(id);
+      return;
+    }
+    const info = (await itemInfo(this.assets, id)) || {}, n = (k) => Number(info[k]) || 0;
+    const karma = !!(it.flag & (it.type === 1 ? 0x10 : 0x02)), gone = "This item can't be taken back once \r\nthrown away. Will you still drop it?";
+    if (n('cash') || BigInt(it.cashId ?? 0) !== 0n || Math.floor(id / 1000) === 4220) { W.notice("You can't drop this item."); return; }
+    if (n('quest') && !karma) { if (everlast || !(await W.confirm(gone))) return; }
+    if (Math.floor(id / 10000) !== 430 && ((it.type === 1 && it.flag & 0x08) || n('tradeBlock'))) {
+      if (everlast || !(await W.confirm(karma ? 'Once dropped, the item cannot be traded.\r\nWould you still like to drop it?' : gone))) return;
+    }
+    if (n('accountSharable') && !(await W.confirm('This item cannot be recovered once dropped. However, It is possible to transfer it to a different character on the same account by using the storage system. \r\n\r\nDo you really want to drop this item?'))) return;
+    if (it.type !== 3 && it.flag & 1) { W.notice('Sealed items cannot be\r\nsold, traded, or dropped.'); return; }
+    if (Math.floor(id / 10000) === 430 && !(await W.confirm('Would you like to throw\r\naway this card?'))) return;
+    let qty = 1;
+    if ([2, 3, 4].includes(invType(id)) && ![207, 233].includes(Math.floor(id / 10000)) && permanent(it.expiration) && it.quantity > 1) {
+      qty = await W.askNumber('How many will you drop?', it.quantity, 1, it.quantity);
+      if (!(qty >= 1)) return;
+    }
+    if (!this.canExclusive(500)) return;
+    if ((this.map?.info?.fieldLimit || 0) & 0x400000) { this.notice('You cannot drop the item here.'); return; }
+    if ((worn ? this.inventory?.equipped?.[slot] : this.inventory?.[tab]?.[slot]) !== it) return;
+    this.net?.moveItem(worn ? 1 : tab, slot, 0, qty);
+    this.lockExclusive();
   }
 
   /**
@@ -5812,6 +6086,114 @@ export class Game {
   optionAllowed(key) {
     try { return JSON.parse(localStorage.getItem('maple.gameopt') || '{}')[key] !== false; } catch { return true; }
   }
+  /**
+   * A chat line starting with '/', as the client reads it (case doesn't matter; a command with a name takes the rest
+   * of the line after one space). The commands are those /? lists, plus /petcome, /pet, /couple, /alliance and
+   * /partysearch; /petcome, /pet and anything else then go on to the expression items (/<an expression item's name>
+   * makes that face when you have it), and a line that is no command is dropped without a word (a GM's goes out as
+   * chat, as typed).
+   */
+  slashCommand(t) {
+    const l = t.toLowerCase(), is = (...cs) => cs.includes(l), say = (m) => this.notice(m);
+    const arg = (c) => (l.startsWith(`${c} `) && t.length > c.length + 1 ? t.slice(c.length + 1) : null);
+    const me = this.player.name, sb = this.statusBar, party = this.party, guild = this.guild;
+    let a;
+    if (is('/?', '/help')) { for (const line of SLASH_HELP) this.hud.message(line, CHAT_COLORS.notice); return; }
+    if (is('/petcome')) {
+      // the pets with that skill come to you, each with PetEff's teleport (the server isn't told)
+      const p = this.player;
+      for (const pet of this.myPets()) {
+        if (!((this.petItem(pet)?.pet?.skill || 0) & 0x80)) continue;
+        pet.x = p.x; pet.y = p.y; pet.vx = 0; pet.vy = 0; pet.fh = null; pet.ladder = null;
+        pet.event(3); pet.event(4);
+        this.petEffect(pet, 1);
+      }
+    } else if (is('/whisper')) {
+      // your last contact, if any
+      const name = sb?.whisperNames?.[0] || '';
+      if (sb) { sb.whisperTo = name; if (name) sb.chatTarget = 'whisper'; }
+      return;
+    } else if ((a = arg('/whisper')) !== null) {
+      if (a.toLowerCase() === me.toLowerCase()) { say("You can't whisper to yourself."); return; }
+      // 4-12 letters and digits, with no more than three of I and l between them
+      if (!/^[A-Za-z0-9]{4,12}$/.test(a) || (a.match(/[Il]/g) || []).length >= 4) { say('Incorrect ID.'); return; }
+      if (sb) { sb.whisperNames = [a, ...(sb.whisperNames || []).filter((n) => n !== a)].slice(0, 10); sb.whisperTo = a; sb.chatTarget = 'whisper'; }
+      return;
+    } else if (is('/buddy', '/party', '/guild', '/alliance', '/couple', '/all')) {
+      if (sb) { sb.chatTarget = { '/buddy': 'buddy', '/party': 'party', '/guild': 'guild', '/alliance': 'alliance', '/couple': 'spouse', '/all': 'all' }[l]; sb.whisperTo = ''; }
+      return;
+    } else if ((a = arg('/find')) !== null) {
+      if (a !== me) this.net.find(a);
+      return;
+    } else if ((a = arg('/trade') ?? arg('/game trade')) !== null) {
+      if (this.player.morph) { this.transformRefusal(); return; }
+      if (this.gm) { say('Not available with an Admin account.'); return; }
+      const rp = [...this.others.values()].find((o) => o.name?.toLowerCase() === a.toLowerCase());
+      if (!rp) { say('Unable to find the character.'); return; }
+      this.net.tradeStart(rp.id);
+      return;
+    } else if (is('/partyinfo')) {
+      if (!party) { say('You have yet to join a party.'); return; }
+      say(`Party member:${Array.from({ length: 6 }, (_, i) => ` ${party.members[i]?.name || ''}`).join('')}`);
+      if (party.leader === this.player.id) say("You're the leader of the party.");
+      return;
+    } else if (is('/makeparty')) {
+      if (party) { say('Already have joined a party.'); return; }
+      if ([0, 1000, 2000, 2001].includes(this.stats?.job ?? 0) && (this.stats?.level ?? 0) < 10) { say('Characters whose level is below Lv. 10, such as Beginners, Noblesses, and Legends cannot form a party.'); return; }
+      this.net.partyOp(1);
+      return;
+    } else if (is('/leaveparty')) {
+      if (!party) { say('You have yet to join a party.'); return; }
+      this.net.partyLeave();
+      return;
+    } else if ((a = arg('/partyinvite')) !== null) {
+      this.partyInvite(a);
+      return;
+    } else if ((a = arg('/partyexpel')) !== null) {
+      if (!party || party.leader !== this.player.id) { say('You are not the master of the party.'); return; }
+      const m = party.members.find((x) => x?.name === a);
+      if (!m) { say(`'${a}'is not a member of your party.`); return; }
+      this.net.partyOp(5, m.id);
+      return;
+    } else if (is('/partysearch')) {
+      this.windows.toggle('partysearch');
+      return;
+    } else if (is('/guildinfo')) {
+      if (!guild) { say('You are not in the guild.'); return; }
+      say(`Guild Member:${guild.members.map((x) => ` ${x.name}`).join('')}`);
+      if (guild.members[0]?.id === this.player.id) say('You are the guild master.');
+      return;
+    } else if (is('/leaveguild')) {
+      if (!guild) { say('You are not in the guild.'); return; }
+      if (guild.members[0]?.id === this.player.id) { say('You cannot quit the guild, since you are the master of the guild.'); return; }
+      this.windows.confirm('Would you like to quit the guild?').then((ok) => { if (ok) this.net?.guildOp(7, this.player.id, me); });
+      return;
+    } else if ((a = arg('/guildinvite')) !== null) {
+      if (a === me) { say('You cannot invite yourself to the guild.'); return; }
+      if (!guild) { say('You are not in the guild.'); return; }
+      const mine = guild.members.find((x) => x.id === this.player.id);
+      if (guild.members[0]?.id !== this.player.id && mine?.rank !== 2) { say('You are not the master of the guild.'); return; }
+      if (guild.members.length >= guild.capacity) { say('You cannot invite more people to the guild.'); return; }
+      this.net.guildOp(5, a);
+      return;
+    } else if ((a = arg('/guildexpel')) !== null) {
+      if (!guild) { say('You are not in the guild.'); return; }
+      const m = guild.members.find((x) => x.name === a), mine = guild.members.find((x) => x.id === this.player.id);
+      if (!m) { say(`'${a}' is not the member of the guild.`); return; }
+      if (mine?.rank === 2 && m.rank === 2) { say('Only Guild Master can expel Jr.Masters.'); return; }
+      if (m.rank === 1) { say('You may not ban the Guild Master.'); return; }
+      this.windows.confirm(`Expel '${a}' from the guild?`).then((ok) => { if (ok) this.net?.guildOp(8, m.id, a); });
+      return;
+    } else if ((a = arg('/pet')) !== null) {
+      this.petTalk(a);
+    }
+    // an expression item's name after the slash: that face, when you have the item
+    if (t.length > 1) {
+      const name = l.slice(1);
+      for (let id = 5160000; id <= 5160014; id++) if ((this.windows.itemName(id) || '').toLowerCase() === name && this.itemCount(id) > 0) { this.useFaceItem(id); break; }
+    }
+    if (this.gm) this.net.chat(t);
+  }
   sendChat(text) {
     // /meter: toggle the EXP/hr & DPS Meter overlay
     if (/^\/meter$/i.test(text.trim())) {
@@ -5883,14 +6265,7 @@ export class Game {
       return;
     }
     if (!this.net) { this.player.chat = { text, t: 5 }; return; }
-    let m = text.match(/^\/(?:w|whisper)\s+(\S+)\s+(.+)$/i);
-    if (m) { this.whisperTo(m[1], m[2]); return; }
-    m = text.match(/^\/r\s+(.+)$/i);
-    if (m) { if (this.lastWhisperFrom) this.whisperTo(this.lastWhisperFrom, m[1]); else this.hud.message('There is no whisper to reply to.', CHAT_COLORS.notice); return; }
-    m = text.match(/^\/find\s+(\S+)$/i);
-    if (m) { this.net.find(m[1]); return; }
-    m = text.match(/^\/pet\s+(.+)$/i);
-    if (m) { this.petTalk(m[1]); return; }
+    if (text.trim().startsWith('/')) { this.slashCommand(text.trim()); return; }
     if (!text.startsWith('/')) { this.petCommandWord(text); this.chatFace(text); }   // your pets hear every line
     // the chat target from the drop-up list beside the chat line
     const target = this.statusBar?.chatTarget || 'all', note = (t) => this.hud.message(t, CHAT_COLORS.notice);
@@ -6064,6 +6439,44 @@ export class Game {
   /** A modal window with its art loaded first. */
   showModal(w) { this.assets.preload(w.frames()).then(() => this.windows.show(w)); }
 
+  /**
+   * Invite someone to your party from their menu, as the client does it: not as a beginner (Beginner, Noblesse,
+   * Legend) below Lv. 10, not yourself, and in a party only as its leader with room left. With no party the invite
+   * alone goes: the server makes the party.
+   */
+  partyInvite(name) {
+    const job = this.stats?.job ?? 0;
+    if ([0, 1000, 2000, 2001].includes(job) && (this.stats?.level ?? 0) < 10) { this.notice('Characters whose level is below Lv. 10, such as Beginners, Noblesses, and Legends cannot form a party.'); return; }
+    if (name === this.player.name) { this.notice('You may not invite yourself to the party.'); return; }
+    if (this.party && this.party.leader !== this.player.id) { this.notice('You are not the master of the party.'); return; }
+    if (this.party && this.party.members.length >= 6) { this.notice('It is impossible to invite someone to the party.'); return; }
+    this.net?.partyOp(4, name);
+  }
+  /** The search forgotten, and the server told (PARTY_SEARCH_UPDATE). */
+  partySearchClear() {
+    Object.assign(this.partySearch, { state: 0, min: 0, max: 0, members: 0, mask: 0 });
+    this.net?.partySearchStop();
+  }
+  /**
+   * What ends a Party Search (making a party, joining one, quitting as its leader, someone joining once the party has
+   * the members it looked for, a map change on the same channel): with its window open, as its STOP (while a search
+   * is on); closed, the search is forgotten and the server told, even when none was on.
+   */
+  partySearchEnd() {
+    const w = this.windows.wins.partysearch;
+    if (w && this.windows.isOpen('partysearch')) { if (this.partySearch.state) w.stop(); return; }
+    this.partySearchClear();
+  }
+  /** On each new map: after a channel change or the Cash Shop a search that was on goes out again; otherwise it ends. */
+  partySearchEntered() {
+    const s = this.partySearch;
+    if (s.restore) {
+      s.restore = false;
+      if (s.state === 1) this.net?.partySearchStart(s.min, s.max, s.members, s.mask);
+      return;
+    }
+    this.partySearchEnd();
+  }
   /** PARTY_OPERATION results: keep this.party = { id, leader, members[] } in step with the server. */
   onParty(p) {
     const me = this.player.id, msg = (t) => this.hud.message(t, CHAT_COLORS.party);
@@ -6096,7 +6509,10 @@ export class Game {
     if (this.party && p.slots) { this.party.slots = p.slots; this.party.doors = p.doors || this.party.doors || null; }
     if (['update', 'join', 'leave', 'expel', 'disband', 'created'].includes(p.kind)) this.refreshTownDoors(false);
     this.windows.wins.partyhp?.sync();
-    this.windows.wins.partysearch?.partyChanged();
+    // a search ends when you make a party, join one, quit as its leader, or someone joins once it has the members it
+    // looked for
+    const joined = p.kind === 'join' && p.name !== this.player.name && this.partySearch.members <= (this.party?.members.length || 0);
+    if (p.kind === 'created' || (p.kind === 'join' && p.name === this.player.name) || (p.kind === 'disband' && p.target === me) || joined) this.partySearchEnd();
   }
 
   /** A whisper with your own whispers off in the Game Option warns you that the answer may not come (chat type 9). */
@@ -6108,7 +6524,9 @@ export class Game {
   onWhisper(w) {
     // whispers off in the Game Option, or from someone on the Blacklist: not shown, and they are told so
     if (!this.optionAllowed('whisper') || this.windows.wins.userlist?.blacklisted(w.from)) { this.net?.whisperBlock(w.from); return; }
-    this.lastWhisperFrom = w.from;
+    // who whispered you is your latest contact (what /whisper alone goes to, and first in the Whisper box's list)
+    const sb = this.statusBar;
+    if (sb) sb.whisperNames = [w.from, ...(sb.whisperNames || []).filter((n) => n !== w.from)].slice(0, 10);
     const ch = w.channel === this.channel ? '' : `[${this.channelNames?.[w.channel] || `Ch. ${w.channel + 1}`}]`;
     this.hud.message(`${w.from}${ch}>> ${this.masked(w.text)}`, CHAT_COLORS.whisper);
   }
@@ -6167,6 +6585,7 @@ export class Game {
     }
   }
   start() {
+    this.setResolution();   // the window's shape as it is now (FIT TO SCREEN), whatever it was while logging in
     // the server has a newer build than this page is running (it keeps the one it loaded until it is reloaded): said
     // once in the chat, looked for every minute and when the tab comes back
     const newer = async () => {
@@ -6241,6 +6660,7 @@ export class Game {
     for (const rp of this.others.values()) if (rp.morphView) rp.morphView.update(rp, rp.action, !!rp.attack, dt, rp.attack ? rp.attackScale || 1 : 1);
     this.questAlert?.update(dt * 1000); this.questAlert?.tick();
     lap('quests');
+    for (const e of this.map.life) if (e.removed && e.leaveType !== undefined) this.bossGone(e);
     this.map.life = this.map.life.filter((e) => !e.removed);
     if (this.reactors) for (const [oid, r] of this.reactors) { r.update(dt); if (r.removed) this.reactors.delete(oid); }
     this.guide?.update(dt);
@@ -6255,6 +6675,7 @@ export class Game {
     if (this.net) this.friendlyMobHit();
     if (this.net) this.hypnoTouch();
     for (const e of this.map.life) if (e.kind === 'Mob' && e.chat && (e.chat.t -= dt) <= 0) e.chat = null;   // monsters' lines run out
+    if (this.net && this.petMpArmed) this.petAutoPot('mp');
     if (this.net) this.touchReactors();
     if (this.net) this.obstaclesHitMobs();
     lap('mobs');
@@ -6479,7 +6900,7 @@ export class Game {
       p.y += p.vy * dt;
       action = l.l ? 'ladder' : 'rope';
       const leaving = () => ({ fh: -(l.id || 0), stance: this.currentStance() });   // how you were on it, for those watching
-      if (jumpHit() && dir && !this.hasDisease(WEAKEN)) {
+      if (jumpHit() && dir && !this.hasDisease(WEAKEN) && this.jumpAllowed()) {
         const leave = leaving();
         p.ladder = null; p.vy = -JUMP * (swim ? 0.3 : 0.5); p.vx = dir * PHYS.walk * ms.speed * 1.3; p.facingRight = dir > 0;   // the client's ladder jump
         this.moveEvent = { kind: 'jump', vx: p.vx, vy: p.vy, leave };
@@ -6498,19 +6919,24 @@ export class Game {
 
     if (p.attack) {
       action = p.attack;
-      if (p.fh) p.vx = 0; else this.playerFall(dt, 0, 0, ms);
+      // (Combat Step's pose slides on with its push)
+      if (p.fh) { if (action === this.skills?.action(COMBAT_STEP)) this.coast(dt); else p.vx = 0; } else this.playerFall(dt, 0, 0, ms);
       if (this.advanceFrame(action, dt)) p.attack = null;
       return;
     }
 
-    // seated (a map seat or a chair): moving, jumping, attacking or a skill stands you up; otherwise you stay put
+    // the Sit key: a seat, or standing up from one (see sitKey)
+    if (!chargingFree && this.hitAction(ACTION.SIT)) this.sitKey();
+    // seated (a map seat or a chair): Left or Right, or Jump (which doesn't jump), asks to stand up; Up still takes a
+    // portal; attacks, skills, macros and picking up do nothing. You stay put until the server says otherwise.
     if (p.seat) {
-      if (dir || jumpHeld() || this.holdAction(ACTION.ATTACK) || this.pressedSkill() || this.macroQueue?.length) this.standUp();
-      else {
-        this.advanceFrame('sit', dt);
-        return;
-      }
-    } else if (!chargingFree && this.hitAction(ACTION.SIT) && this.trySit()) { this.advanceFrame('sit', dt); return; }
+      if (inp.hit('left') || inp.hit('right') || this.hitAction(ACTION.JUMP)) this.askStandUp(200);
+      const portal = inp.hit('up') && p.fh && this.portalCooldown <= 0 ? map.portalAt(p.x, p.y) : null;
+      if (portal) this.usePortal(portal);
+      this.macroQueue = null;
+      this.advanceFrame('sit', dt);
+      return;
+    }
 
     // wait out an attack cut short by a hit
     if (!chargingFree && performance.now() >= (this.attackLock || 0)) {
@@ -6531,17 +6957,19 @@ export class Game {
     }
     if (this.hitAction(ACTION.NPC_CHAT) && this.net) this.talkToNearestNpc();
 
-    if (inp.hit('up') && p.fh && this.useDoorAt(p)) return;
     this.scriptTouch();
     this.touchPortal();
+    this.springPortal(held);
     if (p.fh && this.portalCooldown <= 0) {
       const portal = map.portalAt(p.x, p.y);
       // touch portals fire once on entry, not every frame you stand in them
       const touch = portal && TOUCH_PORTALS.has(portal.pt);
       const touched = touch && portal !== this.touchedPortal;
       this.touchedPortal = touch ? portal : null;
-      if (portal && (inp.hit('up') || touched)) { this.usePortal(portal); if (!touched) return; }
+      if (portal && (inp.hit('up') || touched) && this.usePortal(portal) && !touched) return;
     }
+    // Up where no portal took you: a Mystic Door
+    if (inp.hit('up') && p.fh && this.useDoorAt(p)) return;
     // on the floor, up grabs a ladder / rope whose bottom is at most 20px above your feet (lifting you onto it), and
     // down one whose top is at most 10px below them; left / right may be held too
     if (p.fh && this.canClimb()) {
@@ -6559,11 +6987,11 @@ export class Game {
       if (dir) p.facingRight = dir > 0;
       // holding jump keeps jumping: each landing jumps again (a down-jump still needs its own press); in water a jump
       // goes at most every 300ms
-      if (!this.hasDisease(WEAKEN) && (jumpHit() || (jumpHeld() && !held('down'))) && this.swimJumpReady(swim)) {   // Weakness: no jumping
+      // (a map may forbid jumping, or down-jumps: see jumpAllowed and downJumpAllowed)
+      if (!this.hasDisease(WEAKEN) && (jumpHit() || (jumpHeld() && !held('down'))) && this.swimJumpReady(swim) && (held('down') || this.jumpAllowed())) {   // Weakness: no jumping
         if (held('down')) {
-          const below = fh.below(p.x, p.y + 1, Infinity, p.fh);   // any floor under us, however far down
           // a little hop first, then down through the floor: it stays ignored until we are well past it
-          if (below) {
+          if (this.downJumpAllowed()) {
             this.moveEvent = { kind: 'down', ofh: p.fh.id, x: p.x, y: p.y };
             p.ignoreFh = p.fh; p.ignoreT = 0.45; p.fh = null; p.y = Math.floor(p.y - 1); p.vy = -JUMP * 0.35355339; p.vx = 0; sfx.play('Game/Jump');
           }
@@ -6579,9 +7007,10 @@ export class Game {
           sfx.play('Game/Jump');
         }
       } else {
-        // walking speeds up and slows down rather than starting and stopping dead (moved by the step's average speed)
+        // walking speeds up and slows down rather than starting and stopping dead (moved by the step's average speed);
+        // a conveyor carries you, an icy map's floors are slippery (see groundVelocity)
         const v0 = p.vx || 0;
-        p.vx = dir ? accelerate(v0, dir * PHYS.walkAccel * (swim ? PHYS.swimDec : 1), WALK, dt) : approach(v0, 0, PHYS.walkBrake * dt);
+        p.vx = groundVelocity(v0, dir, p.fh, map.fh.fs, WALK, swim, dt);
         const dx = ((v0 + p.vx) / 2) * dt;
         if (dx) { const r = fh.walk(p, dx); if (r === 'edge') p.vy = 0; else if (r === 'wall') p.vx = 0; }
         if (held('down') && !dir) action = 'prone';
@@ -6595,7 +7024,7 @@ export class Game {
       if (swim) {
         // a stroke: the jump key (pressed, or its key repeat while held) sends you up; nothing else rises
         const key = this.keysFor(5, ACTION.JUMP).some((c) => inp.hit(c) || inp.repeated(c));
-        if (key && !this.hasDisease(WEAKEN) && this.swimJumpReady(true)) {
+        if (key && !this.hasDisease(WEAKEN) && this.swimJumpReady(true) && this.jumpAllowed()) {
           p.vy = -PHYS.swimSpeed * 5 * this.swimShoe(ms).v;
           this.moveEvent = { kind: 'jump', vx: p.vx, vy: p.vy };
         }
@@ -6664,36 +7093,54 @@ export class Game {
   usePortal(portal) {
     const map = this.map;
     this.flushMovement();   // the server and everyone else see where you were before you go
-    // a script portal with no target map (types 7, 8, 11) only asks the server to run its script: no sound, no fade
+    // a script portal with no target map only asks the server to run its script (types 7, 8, 11; no sound, no fade);
+    // any other with none does nothing, and Up then goes to a Mystic Door
     if (portal.tm === 999999999) {
-      if (!this.net) return;
+      if (![7, 8, 11].includes(portal.pt)) return false;
+      if (!this.net) return true;
       this.portalCooldown = 0.5;
       this.net.scriptPortal(portal.pn, { x: Math.round(this.player.x), y: Math.round(this.player.y) });
-      return;
+      return true;
     }
-    sfx.play('Game/Portal');
-    if (portal.tm === map.id && portal.pt !== 4 && portal.pt !== 5) {
-      this.portalCooldown = 0.6;
-      const p = this.player, from = { x: Math.round(p.x), y: Math.round(p.y) };
-      const t = map.spawnPortal(portal.tn);
-      this.playTeleportEffect(from.x, from.y);
-      // for those watching: the portal (4), a tick there, then the jump (3) to 10px over the other one, which you
-      // fall from as after any move
-      const fhId = p.fh?.id || 0, stance = this.currentStance();
-      this.moveBuf.push({ cmd: 4, ...from, fh: fhId, stance, duration: 0 }, { cmd: 0, ...from, vx: 0, vy: 0, fh: fhId, stance, duration: 30 });
-      p.x = t.x; p.y = t.y - 10; p.vx = 0; p.vy = 0; p.fh = null; p.ladder = null; p.seat = null;
-      this.moveBuf.push({ cmd: 3, x: Math.round(p.x), y: Math.round(p.y), fh: 0, stance, duration: 0 });
-      this.moveTotal += 30; this.movePos = { x: p.x, y: p.y }; this.wasAirborne = true; this.downOfh = 0;
-      this.touchedBoxPortal = map.boxPortalAt(p.x, p.y, 3) || null;
-      this.playTeleportEffect(p.x, p.y);
-      this.net?.innerPortal(portal.pn, from, { x: t.x, y: t.y });
-      return;
-    }
+    // the portal sound once the move has gone out; types 4 and 5 go without it (and never within the map)
+    const sound = portal.pt !== 4 && portal.pt !== 5;
+    if (portal.tm === map.id && sound) { this.innerTeleport(portal, map.spawnPortal(portal.tn)); sfx.play('Game/Portal'); return true; }
     this.portalCooldown = 0.5;
     this.fadeOut();
     this.after(3000, () => { if (this.fade?.dir === 'out' && !this.loading && this.map === map) this.fade = { dir: 'in', t0: performance.now() }; });
     if (!this.net) this.changeMap(portal.tm, { portal: portal.tn });
     else this.net.enterPortal(portal.pn);   // the server runs a portal's script, if it has one, from here too
+    if (sound) sfx.play('Game/Portal');
+    return true;
+  }
+  /**
+   * The server moving you through a portal of this map (Mu Lung Dojo's way up, a stage cleared): the portal by its
+   * place among the map's portals, type 6 ones not counted, to the one it names as a portal within the map takes you
+   * (nothing when there is no such portal); a non-zero `free` also lets go of the wait on your last request.
+   */
+  warpUp(free, idx) {
+    if (free) this.releaseExclusive();
+    const map = this.map, portal = map?.portals.filter((p) => p.pt !== 6)[idx];
+    const t = portal && map.portals.find((p) => p.pn === portal.tn);
+    if (!t) return;
+    this.flushMovement();
+    this.innerTeleport(portal, t);
+  }
+  /** Through `portal` to `t` within the map: moved at once, sparkling at both ends, and can go again after 600ms. */
+  innerTeleport(portal, t) {
+    this.portalCooldown = 0.6;
+    const map = this.map, p = this.player, from = { x: Math.round(p.x), y: Math.round(p.y) };
+    this.playTeleportEffect(from.x, from.y);
+    // for those watching: the portal (4), a tick there, then the jump (3) to 10px over the other one, which you
+    // fall from as after any move
+    const fhId = p.fh?.id || 0, stance = this.currentStance();
+    this.moveBuf.push({ cmd: 4, ...from, fh: fhId, stance, duration: 0 }, { cmd: 0, ...from, vx: 0, vy: 0, fh: fhId, stance, duration: 30 });
+    p.x = t.x; p.y = t.y - 10; p.vx = 0; p.vy = 0; p.fh = null; p.ladder = null; p.seat = null;
+    this.moveBuf.push({ cmd: 3, x: Math.round(p.x), y: Math.round(p.y), fh: 0, stance, duration: 0 });
+    this.moveTotal += 30; this.movePos = { x: p.x, y: p.y }; this.wasAirborne = true; this.downOfh = 0;
+    this.touchedBoxPortal = map.boxPortalAt(p.x, p.y, 3) || null;
+    this.playTeleportEffect(p.x, p.y);
+    this.net?.innerPortal(portal.pn, from, { x: t.x, y: t.y });
   }
   /**
    * Touch portals (type 3) take you as soon as you are inside their hRange x vRange box: on a floor, in the air or on
@@ -6805,11 +7252,66 @@ export class Game {
     if (p.fh) p.zMass = p.fh.zMass;
     this.coast(dt);
   }
-  /** No input: on a floor you slide to a stop, in the air you fall (and stop on landing). */
+  /** No input: on a floor you slide to a stop (or a conveyor carries you), in the air you fall (and stop on landing). */
   coast(dt) {
     const p = this.player, fh = this.map.fh;
-    if (p.fh) { const v0 = p.vx || 0; p.vx = approach(v0, 0, PHYS.walkBrake * dt); const dx = ((v0 + p.vx) / 2) * dt; if (dx) fh.walk(p, dx); }
+    if (p.fh) {
+      const v0 = p.vx || 0, swim = this.map.swimming(p.x, p.y), max = PHYS.walk * this.moveStats().speed * (swim ? PHYS.swimDec : 1);
+      p.vx = groundVelocity(v0, 0, p.fh, fh.fs, max, swim, dt);
+      const dx = ((v0 + p.vx) / 2) * dt;
+      if (dx) fh.walk(p, dx);
+    }
     else { this.playerFall(dt, 0, 0); if (p.fh) p.vx = 0; }
+  }
+
+  /** Jumping (from a floor, a ladder or rope, or a stroke in water): not on a map that forbids it (fieldLimit 0x1), unless a GM. */
+  jumpAllowed() { return !!this.gm || !((this.map?.info?.fieldLimit || 0) & 0x1); }
+  /**
+   * A down-jump from the floor you stand on: not on a map that forbids it (fieldLimit 0x20000; a GM may), nor standing
+   * in a spring portal (type 12 or 13), nor from a floor marked forbidFallDown; and only with somewhere to land: the
+   * lowest floor at most 300px down, else the nearest one 300-600px down, and not one at your own height (within 5px).
+   */
+  downJumpAllowed() {
+    const p = this.player, map = this.map, own = p.fh;
+    if (!own) return false;
+    if (!this.gm && (map.info?.fieldLimit || 0) & 0x20000) return false;
+    const tp = map.touchPortalAt(p.x, p.y);
+    if (tp && (tp.pt === 12 || tp.pt === 13)) return false;
+    if (Number(own.forbidFallDown)) return false;
+    const x = Math.trunc(p.x), y = Math.trunc(p.y);
+    const at = (f) => f.y1 + Math.trunc(((f.y2 - f.y1) * (x - f.x1)) / (f.x2 - f.x1));
+    let to = null, ty = -Infinity;
+    for (const f of map.fh.floors) { if (x < f.x1 || x > f.x2) continue; const fy = at(f); if (fy <= y + 300 && fy > ty) { to = f; ty = fy; } }
+    if (!to || to === own) {
+      to = null; ty = y + 600;
+      for (const f of map.fh.floors) { if (x < f.x1 || x > f.x2) continue; const fy = at(f); if (fy >= y + 300 && fy < ty) { to = f; ty = fy; } }
+    }
+    return !!to && !(ty > y - 5 && ty < y + 5);
+  }
+  /**
+   * Spring portals, while you stand on a floor in one's box. Type 12 throws you 2300 up and 200 the way you face, 100
+   * more or less with an arrow held. Type 13 throws you by its horizontalImpact and verticalImpact, only on the maps
+   * that have them (field types 19, 20, 21 and 25, and the GM room) and, when it names a reactor, while that one is
+   * in state 1. Both show BasicEff's VerticalJump; those watching see the throw (movement 18, or 19).
+   */
+  springPortal(held) {
+    const p = this.player, map = this.map;
+    if (!p.fh || p.ladder || this.dead) return;
+    const tp = map.touchPortalAt(p.x, p.y);
+    if (!tp || (tp.pt !== 12 && tp.pt !== 13)) return;
+    let vx, vy, flip;
+    if (tp.pt === 12) {
+      vx = (p.facingRight ? 200 : -200) + (held('left') ? -100 : 0) + (held('right') ? 100 : 0); vy = -2300; flip = p.facingRight;
+    } else {
+      if (![19, 20, 21, 25].includes(Number(map.info?.fieldType)) && map.id !== 180000002) return;
+      if (tp.reactorName) { const r = [...(this.reactors?.values() || [])].find((e) => e.name === tp.reactorName); if (r?.cur !== 1) return; }
+      vx = Number(tp.horizontalImpact) || 0; vy = -(Number(tp.verticalImpact) || 0); flip = vx !== 0;
+    }
+    const impact = (v, k) => (k > 0 ? (v < k ? Math.min(v + k, k) : v) : (v > k ? Math.max(v + k, k) : v));
+    p.y = Math.floor(p.y - 1); p.fh = null;
+    p.vx = impact(p.vx || 0, vx); p.vy = impact(p.vy || 0, vy);
+    this.moveEvent = { kind: 'jump', cmd: tp.pt === 12 ? 18 : 19, vx: p.vx, vy: p.vy };
+    this.playBasicEff('VerticalJump', p.x, p.y, flip);
   }
 
   /** Mounts can't climb, except Monster Rider's (190xxxx) and those of 1932001-1932005 and 1932007-1932011. */
@@ -6847,6 +7349,7 @@ export class Game {
   useSkill(id) {
     if (SWAPPED_IN.has(id)) return false;
     if (SKILL_SWAPS[id] && this.skills?.level(SKILL_SWAPS[id])) id = SKILL_SWAPS[id];
+    if (ARAN_SWINGS[id]) id = ARAN_SWINGS[id].find(([by]) => this.skills?.level(by) > 0)?.[1] ?? id;
     if (this.hasDisease(SEAL) && !HEROS_WILLS.has(id)) return false;   // sealed by a monster: only Hero's Will
     // morphed: a potion morph or the Oak Barrel (going in or out too) uses no skill; a transformation not these
     const mt = this.morphTpl();
@@ -6868,7 +7371,6 @@ export class Game {
     if (id === ASSASSINATE && !this.darkSight()) return false;   // Assassinate only comes out of Dark Sight
     if (this.player.ladder && (kind !== 'special' || NO_LADDER.has(id))) return false;   // on a ladder or rope only buffs
     if (SHIP_SHOTS.has(id) && !this.onShip()) { this.notice('This skill is available only when you are riding the Battleship.'); return false; }
-    if (MOVE_LIMITED_SAY.has(id) && (this.map?.info?.fieldLimit || 0) & 2) { this.notice('You cannot use that skill on this map.'); return false; }
     if (performance.now() < (this.reuseAt?.[id] || 0)) return false;
     // any other skill ends a Dash
     if (!DASHES.includes(id) && this.dashing() && performance.now() > (this.dashEndSent || 0)) {
@@ -6881,9 +7383,11 @@ export class Game {
     if ((SHOCKWAVES.has(id) && !this.player.morph) || (SUPER_ONLY.has(id) && !(this.player.morph && this.morphReason === SUPER_TRANSFORMATION))) {
       this.notice('This skill is available only during transformation.'); return false;
     }
-    if (MONSTER_MAGNETS.has(id) || BIG_BANGS.has(id) || id === EXPLOSION || CHARGE_BLOWS.has(id)) return this.holdCharge(id, lv);
-    if (FLASH_JUMPS.has(id)) return this.flashJump(id, lv);
-    if (id === CHAKRA) return this.castChakra(id, lv);
+    if (MONSTER_MAGNETS.has(id) || BIG_BANGS.has(id) || id === EXPLOSION || CHARGE_BLOWS.has(id)) return this.skillWentOff(this.holdCharge(id, lv));
+    if (FLASH_JUMPS.has(id)) return this.skillWentOff(this.flashJump(id, lv));
+    if (id === SOUL_RUSH) return this.skillWentOff(this.soulRush(id, lv));
+    if (id === COMBAT_STEP) return this.skillWentOff(this.combatStep(id, lv));
+    if (id === CHAKRA) return this.skillWentOff(this.castChakra(id, lv));
     // Assaulter needs a monster to go for and floor where it ends; Boomerang Step floor 150px ahead
     const ahead = (dx) => this.floorNear(this.player.x + (this.player.facingRight ? dx : -dx), this.player.y, 80);
     if (id === ASSAULTER && (!ahead(-(sb.levelData(id)?.lt?.[0] || 200))
@@ -6891,7 +7395,7 @@ export class Game {
     // Barrage and Energy Drain only go off with a monster in reach
     if (NEED_TARGET.has(id) && !this.findTargets('melee', id, lv, 1, sb.action(id) || this.look.attackAction()).length) return false;
     if (id === BOOMERANG_STEP && (!ahead(-(sb.levelData(id)?.lt?.[0] || 300) / 2) || performance.now() < (this.boomerangLock || 0))) return false;
-    if (HELD_SHOTS.has(id) || id === PIERCING_ARROW) return this.holdKeydown(id, lv);
+    if (HELD_SHOTS.has(id) || id === PIERCING_ARROW) return this.skillWentOff(this.holdKeydown(id, lv));
     // Panic and Coma need an orb, Enrage nine; without them the key does nothing
     if (FINISHERS.has(id) && this.comboValue() < 2) return false;
     if (id === ENRAGE && this.comboValue() < 10) return false;
@@ -6901,12 +7405,16 @@ export class Game {
     // Shockwave needs floor 55px ahead (within 30px up or down)
     if (SHOCKWAVES.has(id) && !this.floorNear(this.player.x + (this.player.facingRight ? 55 : -55), this.player.y, 30)) return false;
     if (MOVE_LIMITED.has(id) && ((this.map?.info?.fieldLimit || 0) & 2)) return false;
-    if (id === SHADOW_MESO && this.meso < Math.trunc(((sb.levelData(id)?.moneyCon || 0) * (100 + (this.partner()?.y || 0))) / 100)) { this.notice("You don't have enough mesos to use this skill."); return false; }
     // buffs fire once per key press; Teleport repeats while the key is held (its own delay paces it)
     if (kind === 'special' && !this.skillKeyPressed && !TELEPORTS.has(id)) return false;
     if (TELEPORTS.has(id) && performance.now() < (this.teleportLock || 0)) return false;
     const used = this.attack(id, kind);
     if (used && this.net) this.skillReactors(id);   // a cast can set off reactors waiting for that skill
+    return this.skillWentOff(used);
+  }
+  /** A skill that went off starts the pet's MP potion checks (see petHitPots). */
+  skillWentOff(used) {
+    if (used) this.petMpArmed = true;
     return used;
   }
 
@@ -6937,6 +7445,33 @@ export class Game {
     this.notice(kind === 190 ? 'Not available while riding on the tamed monster.' : 'Not available during the ride.');
     return null;
   }
+  /**
+   * Monster Rider's checks before getting on, in the client's order, each refusal with its notice: a tamed monster
+   * (-18) and a saddle (-19) worn; a cash tamed monster (-118) only with a cash saddle (-119) made for it, and a cash
+   * saddle only with one; a monster that can be ridden (info/tamingMob); the saddle's and the -20 gear's reqLevel no
+   * higher than yours; not on a map that forbids riding (fieldLimit 0x200).
+   */
+  async rideChecks() {
+    const worn = this.inventory?.equipped || {}, [mob, saddle, gear, cashMob, cashSaddle] = [-18, -19, -20, -118, -119].map((s) => worn[s]?.id || 0);
+    if (!mob || !saddle) { this.notice('This skill requires a tamed monster and a saddle.'); return false; }
+    if (cashMob ? !cashSaddle || !(await this.saddleFits(cashSaddle, cashMob)) : cashSaddle) {
+      this.notice('You can ride the tamed cash monster when it is equipped with a Cash Saddle.');
+      return false;
+    }
+    const [mi, si, gi] = await Promise.all([mob, saddle, gear].map((x) => (x ? itemInfo(this.assets, x) : null)));
+    const lvl = this.stats?.level || 0, req = (i) => Number(i?.reqLevel) || 0;
+    if (!Number(mi?.tamingMob) || req(si) > lvl || (gear && req(gi) > lvl) || (this.map?.info?.fieldLimit || 0) & 0x200) {
+      this.notice('You cannot ride on this tamed monster.');
+      return false;
+    }
+    return true;
+  }
+  /** A saddle (191) fits a tamed monster (190) when its art has a part for one with the same last two digits (under 64). */
+  async saddleFits(saddle, mob) {
+    if (Math.floor(saddle / 10000) !== 191 || Math.floor(mob / 10000) !== 190 || mob % 100 >= 64) return false;
+    const img = await this.assets.json(`Character/TamingMob/${pad(saddle, 8)}.img`);
+    return Object.keys(img || {}).some((k) => /^\d+$/.test(k) && Number(k) % 100 === mob % 100);
+  }
 
   /**
    * Basic attack (skillId 0) or skill. kind: melee | ranged | magic | special.
@@ -6965,10 +7500,6 @@ export class Game {
     if (prone) kind = 'melee';
     kind ??= RANGED_WEAPONS.has(wcat) ? 'ranged' : 'melee';
     if (p.ladder && kind !== 'special') return false;   // no attacks of any kind on a ladder or rope
-    if (skillId && this.net && !sb.weaponOk(skillId, weapon)) {
-      this.notice(kind === 'melee' ? 'This skill cannot be used with the equipped item.' : "You cannot use this skill with the weapon you're equipped with.");
-      return false;
-    }
     if (GROUND_ONLY.has(skillId) && !p.fh) return false;
     if (kind === 'magic' && !p.fh && !AIR_SPELLS.has(skillId) && !this.map?.swimming(p.x, p.y)) return false;
     // a plain attack in Dark Sight (without Vanish) only brings you out of it
@@ -6998,9 +7529,13 @@ export class Game {
     const ld = skillId ? sb.levelData(skillId, lv) : null;
     if (skillId && this.net) {
       if (sb.cooling(skillId)) { this.notice('You may not use the skill yet.'); return false; }
-      if ((ld?.mpCon || 0) > this.stats.mp) { this.notice('Not enough MP.'); return false; }
-      if ((ld?.hpCon || 0) >= this.stats.hp) { this.notice('Not enough HP.'); return false; }
-      if (skillId === DRAGON_ROAR && this.stats.hp < this.maxHpShown() / 2) { this.notice("You don't have enough HP to use this skill."); return false; }
+      if (!this.skillCostOk(skillId, ld)) return false;
+      if (MOVE_LIMITED_SAY.has(skillId) && (this.map?.info?.fieldLimit || 0) & 2) { this.notice('You cannot use that skill on this map.'); return false; }
+      if (!sb.weaponOk(skillId, weapon)) {
+        this.notice(THREE_SNAILS.has(skillId) ? 'You may only use this skill with a one-handed weapon equipped.'
+          : kind === 'melee' || EQUIPPED_ITEM_SAY.has(skillId) ? 'This skill cannot be used with the equipped item.' : "You cannot use this skill with the weapon you're equipped with.");
+        return false;
+      }
       if (skillId === FLAME_GEAR && this.flameGearBlocked(lv)) { this.notice('It cannot be used here.'); return false; }
     }
     if (kind === 'special') return this.castSpecial(skillId, lv);
@@ -7165,6 +7700,7 @@ export class Game {
     else if (projectile && !out.length) this.after(hitDelay, () => this.shoot(skillId, p, clip && { ...clip, point: true }, kind === 'ranged' ? ammo : 0, null));
     if (MAGIC_AT_ONCE.has(skillId)) this.teleportLock = performance.now() + TELEPORT_AFTER_ULTIMATE;
     if (heal && !out.length) return true;   // no undead in reach: only the heal went out
+    this.catchBreath();   // any attack that goes out (5s before a channel change, a chair...)
     this.net?.attack(kind, { targets: out, lines: mx ? Math.min(15, mx.mesos.length) : lines, skill: skillId, stance: this.actionId(opts.stance || pose, kind === 'ranged'), facingLeft: !p.facingRight,
       speed: this.attackSpeed(skillId), charge, display: opts.stage2 ? 0x20 : 0,
       mesos: mx?.mesos.map((d) => ({ oid: d.oid, mask: out.reduce((b, t, i) => (i < 8 && mx.touches(t.mob, d) ? b | (1 << i) : b), 0) })), pos: p, delay: Math.round(hitDelay) });
@@ -7242,9 +7778,17 @@ export class Game {
   }
   /** The screen shake of a skill landing (see SHAKERS); `near` is 400 for your own, 400 less the distance for another's. */
   startShake(skillId, near, delay) {
-    if (!settings.shake || near <= 0) return;
+    if (near <= 0) return;
     const shout = skillId === SHOUT;
-    this.after(delay, () => { this.shake = { s: near / (shout ? 15 : 25), f: shout ? 0.85 : 0.92, left: shout ? 1500 : 2000, acc: 0, dx: 0, dy: 0 }; });
+    this.shakeScreen(near / (shout ? 15 : 25), shout, delay);
+  }
+  /**
+   * Shake the screen by px at first, easing by 8% each 30ms step for 2s at most (quick: by 15%, for 1.5s), after delay
+   * ms; one given a duration doesn't ease and lasts that much longer. Only with SHAKE UP on, unless forced.
+   */
+  shakeScreen(px, quick, delay = 0, duration = 0, forced = false) {
+    if (!forced && !settings.shake) return;
+    this.after(delay, () => { this.shake = { s: px, f: duration ? 1 : quick ? 0.85 : 0.92, left: (quick ? 1500 : 2000) + duration, acc: 0, dx: 0, dy: 0 }; });
   }
   shakeStep(dt) {
     const k = this.shake;
@@ -7515,7 +8059,7 @@ export class Game {
       this.notice(GRENADES.has(id) ? "You cannot use this skill with the weapon you're equipped with." : 'This skill cannot be used with the equipped item.');
       return false;
     }
-    if (this.net && (ld?.mpCon || 0) > this.stats.mp) { this.notice('Not enough MP.'); return false; }
+    if (this.net && !this.skillCostOk(id, ld)) return false;
     // a prepare pose the client has no action for ("dash") goes out as none: you stand (or fall) as you are
     const act = node?.prepare?.action, known = !act || ACTIONS.includes(act);
     const pose = !act ? 'alert' : known ? act : p.fh ? this.look.standAction() : 'jump';
@@ -7523,6 +8067,8 @@ export class Game {
     const prepare = id === EXPLOSION ? (this.frameTime(pose, this.look.frameCount(pose)) * p.attackScale) / 1000 : 0;
     this.charging = { id, lv, t: 0, pose, prepare };
     if (GRENADES.has(id)) this.reuseAt = { ...this.reuseAt, [id]: performance.now() + GRENADE_REUSES[id] };
+    if (MONSTER_MAGNETS.has(id)) this.reuseAt = { ...this.reuseAt, [id]: performance.now() + 2000 };   // 2s from the hold starting
+    this.catchBreath();
     this.net?.skillEffect(id, lv, known ? this.actionId(pose) : 0x7fff, !p.facingRight, this.attackSpeed());
     if (node?.keydown) this.loopSkillEffect(id, p, 'keydown', () => this.charging?.id === id);
     if (frames(node?.prepare).length) this.playSkillEffect(id, p, false, 'prepare');
@@ -7696,12 +8242,12 @@ export class Game {
     const p = this.player, sb = this.skills, ld = sb.levelData(id, lv), wcat = Math.floor(this.weaponId() / 10000);
     if (!this.skillKeyPressed || p.attack) return false;
     if (this.net) {
-      if (!sb.weaponOk(id, this.weaponId())) { this.notice('You cannot use this skill with the weapon you are holding.'); return false; }
+      if (!sb.weaponOk(id, this.weaponId())) { this.notice("You cannot use this skill with the weapon you're equipped with."); return false; }
       if (!this.hasAmmo(id)) {
         this.notice(AMMO_OUT[wcat] || AMMO_OUT[145]);
         return id === RAPID_FIRE ? this.attack(0) : false;
       }
-      if ((ld?.mpCon || 0) > this.stats.mp) { this.notice('Not enough MP.'); return false; }
+      if (!this.skillCostOk(id, ld)) return false;
     }
     // a monster within the weapon's swing gets the swing (or a Mortal Blow) and Hurricane / Rapid Fire doesn't start
     if (HELD_SHOTS.has(id) && this.swingsClose()) return this.attack(0);
@@ -7711,6 +8257,7 @@ export class Game {
     const start = performance.now(), last = id === RAPID_FIRE && this.rapidFireAt ? this.rapidFireAt - start : -Infinity;
     this.keydown = { id, lv, t: 0, tick: 0, last, start, pose };
     p.frame = 0; p.frameT = 0;
+    this.catchBreath();
     this.net?.skillEffect(id, lv, this.actionId(pose), !p.facingRight, this.attackSpeed());
     if (LOOP_HOLDS.has(id)) this.holdLoop(id); else sfx.play(`Skill/${pad(id, 7)}/Use`);
     this.keydownArt(this.keydown);
@@ -7803,20 +8350,50 @@ export class Game {
     return 0;
   }
   /** Buffs and other SPECIAL_MOVE skills. */
-  castSpecial(id, lv) {
+  castSpecial(id, lv, checked = false) {
     if (TELEPORTS.has(id)) return this.teleport(id, lv);
     if (id === HEAL) return this.castHeal(id, lv);
+    // Monster Rider getting on: the client's checks first (the gear's data may still be loading)
+    if (MONSTER_RIDERS.has(id) && !this.riding && !checked) { this.rideChecks().then((ok) => { if (ok) this.castSpecial(id, lv, true); }); return true; }
     // Shadow Stars takes its bulletConsume of one kind of star, the first in the Use tab that has enough
     const star = id === SHADOW_STARS ? this.shadowStarsPick(lv) : 0;
     if (id === SHADOW_STARS && !star) { this.hud.message('You do not have enough throwing stars to use this skill.', CHAT_COLOR.error); return false; }
     const p = this.player, node = this.skills.node(id);
+    if (id === MYSTIC_DOOR && !this.doorOk()) return false;
     const action = p.ladder ? (p.ladder.l ? 'ladder2' : 'rope2') : this.skills.action(id) || 'alert2';
     if (this.look.has(action)) { p.attack = action; p.frame = 0; p.frameT = 0; p.action = action; }
+    if (id === RESURRECTION) {
+      // the members it brings back; in a party with nobody to bring back you cast, but nothing goes out (no MP, no
+      // cooldown)
+      const mask = this.partyMask(id, lv);
+      if (!mask) return true;
+      this.playSkillEffect(id, p);
+      this.net?.partyMove(id, lv, mask);
+      return true;
+    }
     this.playSkillEffect(id, p);
     const needsPos = node?.summon || id === 2311002; // summons and Mystic Door are placed at the caster
     this.net?.specialMove(id, lv, needsPos ? { x: Math.round(p.x), y: Math.round(p.y) } : null, star);
+    if (id === MYSTIC_DOOR) this.lockExclusive();   // until the server's answer
+    if (id === SMOKESCREEN) this.catchBreath();
     if (id === WINGS) this.startWings(id, lv);
     return true;
+  }
+  /**
+   * Mystic Door, as the client checks it after its cost: one request at a time (200ms); not on a map that forbids it
+   * (fieldLimit 0x08: "You cannot use that skill on this map."); silently not off the ground, in a town, or on a map
+   * whose id's second and third digits are 09; not within 50px of a portal (any but a spawn point: "You cannot use the
+   * Mystic Door Skill near the portal."); not while another action plays.
+   */
+  doorOk() {
+    const p = this.player, map = this.map, id = map?.id || 0;
+    if (!this.canExclusive(200)) return false;
+    if ((map?.info?.fieldLimit || 0) & 0x08) { this.notice('You cannot use that skill on this map.'); return false; }
+    if (!p.fh || Number(map?.info?.town) || Math.floor(id / 1000000) % 100 === 9) return false;
+    if ((map?.portals || []).some((o) => Number(o.pt) !== 0 && p.x >= o.x - 50 && p.x < o.x + 50 && p.y >= o.y - 50 && p.y < o.y + 50)) {
+      this.notice('You cannot use the Mystic Door Skill near the portal.'); return false;
+    }
+    return !p.attack;
   }
   /**
    * Wings: for its time (s) you fall no faster than x thousandths of the jump speed, with its special art and Loop
@@ -7837,16 +8414,67 @@ export class Game {
   }
 
   /** Heal: the party heal goes out (with the members it reaches), then its strike on the undead in its box. */
+  /**
+   * Whether you can pay for a skill, in the client's order: HP (Dragon Roar wants half of it at least), then MP, then
+   * the item it uses up, by count. A refusal says what was short at most every 2s, and is silent in between.
+   */
+  /**
+   * What a skill costs, as the client checks it before anything goes out (a shortfall says so, at most every 2s):
+   * Dragon Roar needs half your most HP and costs its x% of it; MP is the mpCon, times Element Amplification's x% for
+   * the spells it covers, nothing under Infinity, less Concentrate's % (rounded up from 0.01); then the HP (more than
+   * the cost), the MP (at least), the mesos (Shadow Meso's more with Shadow Partner) and the item it takes.
+   */
+  skillCostOk(skillId, ld) {
+    const short = (what) => {
+      const now = performance.now();
+      if (now - (this.costSaidAt ?? -Infinity) > 2000) { this.costSaidAt = now; this.hud.message(`You don't have enough ${what} to use this skill.`, CHAT_COLOR.error); }
+      return false;
+    };
+    let hpCon = ld?.hpCon || 0;
+    if (skillId === DRAGON_ROAR) {
+      const max = this.maxHpShown();
+      if (this.stats.hp < Math.trunc(max / 2)) return short('HP');
+      hpCon = Math.trunc((max * (ld?.x || 0)) / 100);
+    }
+    const mp = this.skillMpCost(skillId, ld);
+    if (hpCon && this.stats.hp <= hpCon) return short('HP');
+    if (mp && this.stats.mp < mp) return short('MP');
+    let mesos = ld?.moneyCon || 0;
+    if (skillId === SHADOW_MESO && this.partner()) mesos += Math.trunc((mesos * (this.partner()?.y || 0)) / 100);
+    if (mesos && this.meso < mesos) return short('mesos');
+    if ((ld?.itemConNo || 0) > 0 && this.itemCount(ld.itemCon) < ld.itemConNo) return short(this.windows.itemName(ld.itemCon) || 'items');
+    return true;
+  }
+  /** A skill's MP cost: see skillCostOk. */
+  skillMpCost(skillId, ld) {
+    const sb = this.skills, job = this.stats?.job || 0, now = Date.now();
+    const amp = AMPLIFIED.has(skillId) && AMPLIFIERS.find((id) => { const req = Math.floor(id / 10000); return Math.floor(job / 10) === Math.floor(req / 10) && job % 10 >= req % 10 && sb.level(id); });
+    let mp = Math.trunc(((ld?.mpCon || 0) * (amp ? Number(sb.levelData(amp)?.x) || 100 : 100)) / 100);
+    const on = (k) => (this.buffs || []).find((b) => b[k] && b.until > now)?.[k];
+    if (on('infinity')) mp = 0;
+    const c = on('concentrate');
+    if (c) mp = Math.trunc((100 - c) * mp * 0.01 + 0.99);
+    return mp;
+  }
   castHeal(id, lv) {
     if (this.player.ladder) return false;
+    // the client checks the cast before anything goes out: nothing is sent or shown for one it refuses (in the air,
+    // cooling down, or short of what it costs)
+    const p = this.player;
+    if (!p.fh && !AIR_SPELLS.has(id) && !this.map?.swimming(p.x, p.y)) return false;
+    if (this.net && this.skills.cooling(id)) { this.notice('You may not use the skill yet.'); return false; }
+    if (this.net && !this.skillCostOk(id, this.skills.levelData(id, lv))) return false;
     this.playSkillEffect(id, this.player);
-    this.net?.heal(id, lv, this.partyMask(id, lv));
-    return this.attack(id, 'magic', { heal: true });
+    const mask = this.partyMask(id, lv);
+    this.net?.partyMove(id, lv, mask);
+    let members = 0;
+    for (let v = mask; v; v &= v - 1) members++;
+    return this.attack(id, 'magic', { heal: true, healMembers: members });
   }
 
   /**
-   * The party members a skill reaches, one bit per party slot, the first slot highest: you always, the others when
-   * they stand in its box. 0x80 when you aren't in a party.
+   * The party members a skill reaches, one bit per party slot, the first slot highest: you always, the others alive in
+   * its box (Resurrection: not you, only the dead in its box). 0x80 when you aren't in a party.
    */
   partyMask(id, lv) {
     const members = this.party?.members;
@@ -7859,7 +8487,8 @@ export class Game {
       const m = members[i];
       if (!m) continue;
       const rp = this.others.get(m.id);
-      if (m.id === p.id || (rp && rp.state !== 'dead' && rp.x >= x1 && rp.x < x2 && rp.y >= p.y + r.lt[1] && rp.y < p.y + r.rb[1])) mask |= 1;
+      const revive = id === RESURRECTION, inBox = rp && rp.x >= x1 && rp.x < x2 && rp.y >= p.y + r.lt[1] && rp.y < p.y + r.rb[1];
+      if (m.id === p.id ? !revive : inBox && (rp.state === 'dead') === revive) mask |= 1;
     }
     return mask;
   }
@@ -8172,45 +8801,108 @@ export class Game {
   }
 
   // ------------------------------------------------------------------ sitting
-  /** Sitting needs you standing still on the ground (the client's check), and 200ms since the last try. */
-  canSit() {
-    const p = this.player, mt = this.morphTpl();
-    if (mt && !mt.superman) return false;   // not as a potion morph or the Oak Barrel
-    if (!p.fh || p.ladder || p.attack || p.seat || this.dead || Math.abs(p.vx || 0) > 1) return false;
-    if (performance.now() - (this.lastSit || 0) < 200) return false;
-    this.lastSit = performance.now();
-    return true;
-  }
-  /** The Sit key: the map's first seat within 10px across and 30px up or down; you move onto it. */
-  trySit() {
+  /** Standing still on a floor: not in the air, on a ladder or rope, nor moving either way. */
+  standingStill() { const p = this.player; return !!p.fh && !p.ladder && !(p.vx || 0) && !(p.vy || 0); }
+  /** A morph you can't sit or stand up in: one that hides you, or isn't a superman one. */
+  morphBlocks() { const mt = this.morphTpl(); return !!mt && (!!Number(mt.hide) || !mt.superman); }
+  /** A skill held down (Hurricane, Rapid Fire, a charge): no sitting or standing up meanwhile. */
+  holdingSkill() { return !!(this.keydown || this.charging); }
+  /**
+   * The Sit key, as the client takes it: nothing with a skill held down, stunned or seduced; riding or morphed (a
+   * ghost too) it says why; then one request at a time (200ms, alive). Seated (a chair or a map seat), it asks to
+   * stand up and you stay seated until the answer. Standing, it needs no skill held, 5s since a blow or attack and
+   * standing still on a floor, then asks for the map's first seat within 10px across and 30px up or down (the right and
+   * bottom edges left out); with none, nothing. There is no sitting on the bare floor.
+   */
+  sitKey() {
     const p = this.player;
-    if (!this.canSit()) return false;
-    const hit = Object.entries(this.map.data?.seat || {}).find(([, s]) => p.x >= s[0] - 10 && p.x < s[0] + 10 && Math.abs(p.y - s[1]) <= 30);
-    if (!hit) return false;
-    const [id, [x, y]] = hit;
-    p.seat = { id: Number(id), item: 0 }; p.x = x; p.y = y; p.vx = 0;
-    this.net?.cancelChair(Number(id));
-    return true;
+    if (this.holdingSkill() || this.hasDisease(STUN) || this.seduceInput()) return;
+    if (this.ridingRefusal()) return;
+    if (p.ghost || this.morphBlocks()) { this.transformRefusal(); return; }
+    if (!this.canExclusive(200)) return;
+    if (p.seat) { this.net?.cancelChair(-1); this.lockExclusive(); return; }
+    if (this.outOfBreath() || !this.standingStill()) return;
+    const id = this.seatAt(p.x, p.y);
+    if (id < 0) return;
+    this.net?.cancelChair(id);
+    this.lockExclusive();
   }
-  /** A chair item (double-clicked, or on a key): you sit where you stand, the chair under you. Again stands you up. */
-  sitChair(itemId) {
+  /** The first of the map's seats (in its order) whose box, 10px either side and 30px up and down, holds x, y; or -1. */
+  seatAt(x, y) {
+    for (const [id, s] of Object.entries(this.map.data?.seat || {})) if (x >= s[0] - 10 && x < s[0] + 10 && y >= s[1] - 30 && y < s[1] + 30) return Number(id);
+    return -1;
+  }
+  /**
+   * A chair item (double-clicked, or on a key), in the client's order: one request at a time (200ms, alive); not
+   * seated already (a chair or a map seat: nothing), with a skill held down, within 5s of a blow or attack, nor
+   * unless standing still on a floor; not morphed (it says why); not riding (it says why); not on a photo-booth map
+   * (field type 61: "It is not appropriate to use it here."); not below the chair's reqLevel (silently). USE_CHAIR
+   * then goes, and you sit where you stand with the chair under you at once.
+   */
+  async sitChair(itemId) {
     const p = this.player;
-    if (p.seat) { this.standUp(); return; }
-    if (p.ghost) { this.transformRefusal(); return; }   // nor sits
-    if (!this.canSit()) return;
+    if (!this.canExclusive(200) || p.seat || this.holdingSkill() || this.outOfBreath() || !this.standingStill()) return;
+    if (this.morphBlocks()) { this.transformRefusal(); return; }
+    if (this.ridingRefusal()) return;
+    if (!this.map || Number(this.map.info?.fieldType) === 61) { this.hud.message('It is not appropriate to use it here.', CHAT_COLOR.error); return; }
+    if ((this.stats?.level || 0) < (Number((await itemInfo(this.assets, itemId))?.reqLevel) || 0)) return;
+    if (p.seat || !this.canExclusive(200)) return;
+    this.net?.useChair(itemId);
+    this.lockExclusive();
     p.seat = { id: null, item: itemId }; p.vx = 0;
     this.chairArt(itemId);
-    this.net?.useChair(itemId);
   }
-  /** Off the seat or chair; tell is false when the server already stood you up. */
-  standUp(tell = true) {
+  /**
+   * Asks to stand up (CANCEL_CHAIR -1) when no other request waits and `wait` ms have passed since the last: Left or
+   * Right and Jump while seated (200ms), a blow that does damage and the last chair leaving your inventory (no wait).
+   * You stay seated until the server answers.
+   */
+  askStandUp(wait) {
+    if (!this.player.seat || !this.canExclusive(wait)) return;
+    this.net?.cancelChair(-1);
+    this.lockExclusive();
+  }
+  /** Off the seat or chair, here and now (the server's answer, becoming a ghost or taking a morph). */
+  leaveSeat() {
     const p = this.player;
     if (!p.seat) return;
     p.seat = null;
     if (p.fh) p.y = Footholds.yAt(p.fh, p.x);
-    if (tell) this.net?.cancelChair(-1);
   }
-  /** Item/Install/0301.img/<id>: effect/effect2/effect3/randEffect1, Effect/ItemEff.img, and Character/TamingMob (tamingMob). */
+  /**
+   * The server's answer to CANCEL_CHAIR (it lets the next request go): stand up, or a map seat - yours if you are
+   * still within its box (you move onto its spot), otherwise you ask straight away to stand up again.
+   */
+  chairAnswer(seat) {
+    this.releaseExclusive();
+    const p = this.player;
+    if (seat < 0) { this.leaveSeat(); return; }
+    const s = this.map.data?.seat?.[seat];
+    if (s && p.x >= s[0] - 10 && p.x < s[0] + 10 && p.y >= s[1] - 30 && p.y < s[1] + 30) { p.seat = { id: seat, item: 0 }; p.x = s[0]; p.y = s[1]; p.vx = 0; return; }
+    p.seat = null;
+    this.net?.cancelChair(-1);
+  }
+  /**
+   * The map's own effect on everyone in it (info/effect: Aqua Road's Bubbling), looping from their feet in front of
+   * them, from when they are first seen on the map.
+   */
+  drawMapEffect(ctx, ent, sx, sy) {
+    const fr = this.map?.mapEffFrames;
+    if (!fr?.length) return;
+    if (ent.mapEffMap !== this.map.id) { ent.mapEffMap = this.map.id; ent.mapEffT0 = performance.now(); }
+    const delay = (f) => Number(f.delay) || 100, total = fr.reduce((t, f) => t + delay(f), 0);
+    let t = (performance.now() - ent.mapEffT0) % total, n = fr[0];
+    for (const f of fr) { if (t < delay(f)) { n = f; break; } t -= delay(f); }
+    const img = this.assets.image(n);
+    if (!img) return;
+    const o = n.origin || [0, 0];
+    ctx.drawImage(img, Math.round(sx - o[0]), Math.round(sy - o[1]));
+  }
+  /**
+   * Item/Install/0301.img/<id>: the chair's pictures (loaded once per chair) - its effect and, on twelve chairs,
+   * effect2 - each looping (120ms a frame unless it says), in front of its sitter when its z is 0 or more (3 when
+   * unset), behind them below 0.
+   */
   chairArt(id) {
     this.chairs ??= new Map();
     if (!this.chairs.has(id)) {
@@ -8379,7 +9071,7 @@ export class Game {
     if (!this.skillKeyPressed || p.fh || p.ladder || p.attack || this.fjUsed) return false;
     if ((p.vy || 0) > 0 && !this.map.swimming(p.x, p.y)) return false;   // falling, except in water
     if ((this.map?.info?.fieldLimit || 0) & 2) { this.notice('You cannot use that skill on this map.'); return false; }
-    if (this.net && (ld?.mpCon || 0) > this.stats.mp) { this.notice('Not enough MP.'); return false; }
+    if (this.net && !this.skillCostOk(id, ld)) return false;
     const n = Math.floor(lv / 4), dir = p.facingRight ? 1 : -1;
     const impact = (v, k) => (k > 0 ? (v < k ? Math.min(v + k, k) : v) : (v > k ? Math.max(v + k, k) : v));
     p.vx = impact(p.vx || 0, dir * (350 + 40 * n)); p.vy = impact(p.vy || 0, -(250 + 20 * n));
@@ -8390,6 +9082,47 @@ export class Game {
     return true;
   }
   /**
+   * Soul Rush: a Flash Jump at twice its level, but from the floor: not on a map that forbids movement skills, nor on
+   * a ladder or rope, mid-attack or straight after a Flash Jump. Thrown forward 350 + 40 and up 250 + 20 for every 4
+   * of that, with BasicEff's SoulRush where you were; 1.5s before the next.
+   */
+  soulRush(id, lv) {
+    const p = this.player;
+    if (!this.skillKeyPressed) return false;
+    if ((this.map?.info?.fieldLimit || 0) & 2) { this.notice('You cannot use that skill on this map.'); return false; }
+    if (!p.fh || p.ladder || p.attack || this.fjUsed) return false;
+    if (this.net && !this.skillCostOk(id, this.skills.levelData(id, lv))) return false;
+    this.net?.specialMove(id, lv, null);
+    this.fjUsed = true;
+    const n = Math.floor((lv * 2) / 4), dir = p.facingRight ? 1 : -1;
+    const impact = (v, k) => (k > 0 ? (v < k ? Math.min(v + k, k) : v) : (v > k ? Math.max(v + k, k) : v));
+    p.y = Math.floor(p.y - 1); p.fh = null;
+    p.vx = impact(p.vx || 0, dir * (350 + 40 * n)); p.vy = impact(p.vy || 0, -(250 + 20 * n));
+    this.playBasicEff('SoulRush', p.x, p.y, p.facingRight);
+    this.reuseAt = { ...this.reuseAt, [id]: performance.now() + SOUL_RUSH_REUSE };
+    return true;
+  }
+  /**
+   * Combat Step: from the floor, not on a map that forbids movement skills (silently), nor standing in a spring portal
+   * (types 12, 13). Pushed the way you face at its x (650 at level 1), sliding to a stop through its pose; 1s before
+   * the next.
+   */
+  combatStep(id, lv) {
+    const p = this.player, map = this.map, ld = this.skills.levelData(id, lv);
+    if ((map?.info?.fieldLimit || 0) & 2) return false;
+    if (!p.fh || p.ladder || p.attack) return false;
+    const tp = map.touchPortalAt(p.x, p.y);
+    if (tp && (tp.pt === 12 || tp.pt === 13)) return false;
+    if (this.net && !this.skillCostOk(id, ld)) return false;
+    this.net?.specialMove(id, lv, null);
+    const k = (p.facingRight ? 1 : -1) * (ld?.x || 0), v = p.vx || 0;
+    p.vx = k > 0 ? (v < k ? Math.min(v + k, k) : v) : (v > k ? Math.max(v + k, k) : v);
+    const action = this.skills.action(id);
+    if (action && this.look.has(action)) { p.attack = action; p.frame = 0; p.frameT = 0; p.action = action; }
+    this.reuseAt = { ...this.reuseAt, [id]: performance.now() + COMBAT_STEP_REUSE };
+    return true;
+  }
+  /**
    * Chakra: only at 49% HP or less. It winds up in its prepare pose (others are told), blows doing x% meanwhile, and
    * goes off when the pose ends.
    */
@@ -8397,10 +9130,11 @@ export class Game {
     const p = this.player, ld = this.skills.levelData(id, lv);
     if (!this.skillKeyPressed || p.attack || this.chakra || p.ladder) return false;
     if (((this.stats?.hp || 0) * 100) / Math.max(1, this.maxHpShown()) > 49) return false;
-    if (this.net && (ld?.mpCon || 0) > this.stats.mp) { this.notice('Not enough MP.'); return false; }
+    if (this.net && !this.skillCostOk(id, ld)) return false;
     const action = this.skills.node(id)?.prepare?.action, pose = action && this.look.has(action) ? action : 'alert';
     p.attack = pose; p.action = pose; p.frame = 0; p.frameT = 0; p.attackScale = this.attackScale();
     this.chakra = { x: ld?.x || 100 };
+    this.catchBreath();
     this.net?.skillEffect(id, lv, this.actionId(pose), !p.facingRight, this.attackSpeed());
     this.playSkillEffect(id, p, false, 'prepare');
     this.after(this.frameTime(pose, this.look.frameCount(pose)) * p.attackScale, () => {
@@ -8777,6 +9511,66 @@ export class Game {
     if (m === this.beaconMob && this.skills.level(BULLSEYE)) d = (d * ((Number(this.skills.levelData(BULLSEYE)?.x) || 0) + 100)) / 100;
     return { d: Math.min(199999, Math.max(1, Math.trunc(d))), c };
   }
+  /**
+   * One damage line of a spell on monster m:
+   *  - a guard stops it, magic immunity lets 1 through; a fixed-damage spell then misses by level alone (fixedMiss);
+   *  - otherwise it misses when a roll of 50-120% of your magic accuracy, (INT / 10 + LUK / 10) x 5 x 100 / (255 + 10
+   *    per level the monster has over you), is under the monster's avoid;
+   *  - your magic is INT plus your gear's (and Dragon Soul's), to 1999, plus the magic buff, to 1999;
+   *  - Heal: (the members and monsters it reaches x 0.3 + 1) x its hp% x (1.5 x a roll of 20-80% of INT + LUK) x
+   *    magic x 0.005, shared among them; any other spell: (3.3 x a roll of magic x mastery to magic + (0.058 x
+   *    magic)^2 + INT / 2) x its mad%, mastery being (the skill's, or an Evan's Magic Mastery's, x 5 + 10) x 0.9%;
+   *  - Element Amplification's y%; the monster's element (weak x1.5, strong x0.5, immune x0; Element Composition half
+   *    and half of its two); less 50-60% of its magic defence;
+   *  - a critical (Sharp Eyes, an Evan's Critical Magic) x (1 + its extra %); a Weakness passive's damage % on its own
+   *    monster; a charge (Big Bang) x (held ms x 90 / its longest + 10)%; Hard Skin stops all but criticals; Bullseye
+   *    x% more; the weapon's elemental magic % (incRMA*, else elemDefault); the monster's damage-taken buff;
+   *  - held to 1-199999.
+   */
+  magicHit(m, skillId, ld, charge = 0, reached = 1) {
+    const info = m.src?.info || {}, now = Date.now(), job = this.stats?.job || 0, sb = this.skills;
+    const rand = (a, b) => { const lo = Math.min(a, b), hi = Math.max(a, b); return lo + Math.random() * (hi - lo); };
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v)), num = (v) => Number(v) || 0;
+    const buff = (k) => Math.max(0, ...(this.buffs || []).filter((b) => b[k] && b.until > now).map((b) => b[k]));
+    if (guarded(m)) return { d: 0, c: false };
+    if (immuneTo(m, MAGIC_IMMUNE)) return { d: 1, c: false };
+    if (ld?.fixdamage) return { d: this.fixedMiss(m) ? 0 : ld.fixdamage, c: false };
+    const INT = this.totalStat('int'), LUK = this.totalStat('luk'), lv = this.stats?.level || 1;
+    const over = Math.max(0, (info.level || 0) - lv), acc = ((Math.floor(INT / 10) + Math.floor(LUK / 10)) * 5 * 100) / (over * 10 + 255);
+    if (rand(acc * 0.5, acc * 1.2) < clamp(info.eva || 0, 0, 999)) return { d: 0, c: false };
+    const soul = sb.level(DRAGON_SOUL) ? num(sb.levelData(DRAGON_SOUL)?.mad) : 0;
+    const MAD = clamp(clamp(INT + this.equipStat('matk') + soul, 0, 1999) + buff('matk'), 0, 1999);
+    const k = (num(sb.level(EVAN_MAGIC_MASTERY) ? sb.levelData(EVAN_MAGIC_MASTERY)?.mastery : ld?.mastery) * 5 + 10) * 0.009;
+    let d = skillId === HEAL
+      ? ((reached * 0.3 + 1) * num(ld?.hp) * 0.01 * (1.5 * rand(INT * 0.2, INT * 0.8) + LUK) * MAD * 0.005) / reached
+      : (3.3 * rand(MAD * k, MAD) + (0.058 * MAD) ** 2 + INT * 0.5) * num(ld?.mad) * 0.01;
+    // Element Amplification: its job's own (the first for 211, 212; a later job of the same line takes it too)
+    const amp = AMPLIFIERS.find((id) => { const req = Math.floor(id / 10000); return Math.floor(job / 10) === Math.floor(req / 10) && job % 10 >= req % 10 && sb.level(id); });
+    d = ((amp ? num(sb.levelData(amp)?.y) : 100) * d) * 0.01;
+    const digit = (e) => num(new RegExp(`${e}(\\d)`).exec(info.elemAttr || '')?.[1]);
+    const vs = (v, a) => (a === 1 ? 0 : a === 2 ? v * 0.5 : a === 3 ? Math.min(Math.max(v, v * 1.5), 199999) : v);
+    const elem = String(sb.node(skillId)?.elemAttr || 'p').toUpperCase();
+    if (skillId === FP_COMPOSITION) d = vs(d / 2, digit('F')) + vs(d / 2, digit('S'));
+    else if (skillId === IL_COMPOSITION) d = vs(d / 2, digit('L')) + vs(d / 2, digit('I'));
+    else d = vs(d, digit(elem));
+    const mdd = clamp(info.MDDamage || 0, 0, 1999);
+    d -= rand(mdd * 0.5, mdd * 0.6);
+    const se = (this.buffs || []).find((b) => b.sharpEyes && b.until > now)?.sharpEyes;
+    let rate = clamp(se?.rate || 0, 0, 100), cdmg = se?.dmg || 0;
+    if ((Math.floor(job / 100) === 22 || job === 2001) && sb.level(CRITICAL_MAGIC)) { const cm = sb.levelData(CRITICAL_MAGIC); rate += num(cm?.prop); cdmg += num(cm?.damage); }
+    const c = rate > 0 && cdmg > 0 && Math.random() * 100 < rate;
+    if (c) d *= 1 + (cdmg - (cdmg <= 200 ? 100 : 200)) * 0.01;
+    // Pig's, Stump's and Slime's Weakness (your line's own): their damage % on their monster
+    const line = Math.floor(job / 100) === 22 || job === 2001 ? 2001 : Math.floor(job / 1000) * 1000;
+    for (const id of [9000, 9001, 9002].map((x) => line * 10000 + x)) if (sb.level(id) && num(sb.node(id)?.mobCode) === m.spawn?.id) d *= num(sb.levelData(id)?.damage) * 0.01;
+    if (charge) d *= (Math.floor((charge * 90) / (BIG_BANGS.has(skillId) || EVAN_CHARGES.has(skillId) ? 1000 : 2000)) + 10) * 0.01;
+    if (!c && m.status?.second & HARD_SKIN) return { d: 0, c: false };
+    if (m === this.beaconMob && sb.level(BULLSEYE)) d *= (num(sb.levelData(BULLSEYE)?.x) + 100) * 0.01;
+    const wi = this.windows?.info?.(this.weaponId()), key = { I: 'incRMAI', F: 'incRMAF', L: 'incRMAL', S: 'incRMAS', H: 'incRMAH' }[elem];
+    if (wi && key) { const w = Number(wi[key] ?? wi.elemDefault ?? 100); d *= (w > 0 ? w : 0) * 0.01; }
+    if (takenPct(m)) d *= (takenPct(m) + 100) * 0.01;
+    return { d: Math.trunc(clamp(d, 1, 199999)), c };
+  }
   /** Your accuracy x 100 / (255 + 10 a level the monster has over you), x 0.7-1.3, under its avoid: a miss. */
   accuracyMiss(info, over) {
     const now = Date.now(), accBuff = Math.max(0, ...(this.buffs || []).filter((b) => b.acc && b.until > now).map((b) => b.acc));
@@ -9121,6 +9915,7 @@ export class Game {
     p.attack = pose; p.frame = 0; p.frameT = 0; p.action = pose;
     const scale = p.attackScale = this.attackScale(this.attackSpeed(0)), trailAt = this.hitFrame(pose, 'melee');
     this.after(this.frameTime(pose, trailAt) * scale, () => { this.playAfterimage(pose, trailAt, 0); this.playWeaponSound(p); });
+    this.catchBreath();
     this.net?.attack('melee', { targets: [], lines: 1, stance: this.actionId(pose), facingLeft: !p.facingRight, speed: this.attackSpeed(0), at: p });
     return { hit, delay: Math.round(this.look.attackDelay(pose) * scale) };
   }
@@ -9546,7 +10341,8 @@ export class Game {
       else if (m.aggro instanceof Summon) m.aggro = this.player;
     }
     if (!pp || (pp.hitT -= dt) > 0) return;
-    const box = { left: pp.x - pp.reach - 8, right: pp.x + pp.reach + 8, top: pp.y - 60, bottom: pp.y + 5 };
+    // what a monster runs into: its body this frame, with where it was the tick before
+    const box = pp.hitBox() || { left: pp.x - pp.reach - 8, right: pp.x + pp.reach + 8, top: pp.y - 60, bottom: pp.y + 5 };
     for (const m of this.map.life) {
       if (m.kind !== 'Mob' || !m.alive || m.dying || m.oid === null || !m.hasBody || m.src.info?.bodyAttack === 0) continue;
       const b = m.hitBox();
@@ -9876,9 +10672,10 @@ export class Game {
   fieldHurt(d, vx, vy, disease = 0) {
     const p = this.player;
     this.net.takeObstacleDamage(d, disease);
+    this.petHitPots(null, d, -2);
     this.vfx?.damage(p, [d], 'violet');
     setExpression(p, 1, HIT_FACE_TIME);
-    this.standUp();
+    if (d > 0) this.askStandUp(0);   // a blow that does damage asks to stand up
     if ((vx || vy) && !this.holdsStance()) {
       if (vy < 0 && p.fh) p.y = Math.floor(p.y - 1);
       if (vy < 0) { p.fh = null; p.ladder = null; }
@@ -9894,9 +10691,9 @@ export class Game {
    * accuracy is no more than a roll between a tenth of your avoid and all of it.
    * Physical: attack x 0.80-0.85 x attack / 100, less (s x 0.00125 + 0.28) x your defence and a share of how far your
    * defence is above or below the standard for your class and level (Base/StandardPDD.img), s being a mix of your stats
-   * ((LUK + DEX) / 4 + INT / 9 + STR x 2/7 for a warrior, LUK / 4 + INT / 9 + DEX x 2/7 + STR x 0.4 for the rest);
-   * nothing left is a MISS. Magic: its magic attack x 0.75-0.80 x itself / 100, less (DEX / 6 + STR / 7 + LUK / 5 +
-   * magic defence) x 0.3 (a magician's) or 0.25, at least 1.
+   * ((LUK + DEX) / 4 + INT / 9 + STR x 2/7 for a warrior, LUK / 4 + INT / 9 + DEX x 2/7 + STR x 0.4 for the rest),
+   * then Invincible's x% of what is left. Magic: its magic attack x 0.75-0.80 x itself / 100, less (DEX / 6 + STR / 7 + LUK / 5 + magic defence) x 0.3 (a
+   * magician's) or 0.25. Either is held to 1-199999: a blow that isn't dodged does at least 1.
    */
   damageTaken(m, power, magic) {
     const info = m.src?.info || {}, s = this.stats || {}, lv = s.level || 1, cls = Math.floor(((s.job || 0) % 1000) / 100);
@@ -9909,8 +10706,8 @@ export class Game {
     if (magic) {
       if (acc <= rand(avoid * 0.1, avoid)) return 0;
       const mad = clamp(info.MADamage ?? power, 0, 1999), mdd = clamp(this.equipStat('mdef') + buff('mdef'), 0, 1999);
-      const d = Math.trunc(rand(mad * 0.75, mad * 0.8) * mad * 0.01 - (T('dex') / 6 + T('str') / 7 + T('luk') / 5 + mdd) * (cls === 2 ? 0.3 : 0.25));
-      return d === 0 ? 0 : Math.max(1, d);
+      const d = rand(mad * 0.75, mad * 0.8) * mad * 0.01 - (T('dex') / 6 + T('str') / 7 + T('luk') / 5 + mdd) * (cls === 2 ? 0.3 : 0.25);
+      return Math.trunc(clamp(d, 1, 199999));
     }
     const chance = (avoid / (acc * 4.5)) * 100;
     if (Math.random() * 100 < (cls === 4 ? clamp(chance, 5, 95) : clamp(chance, 2, 80))) return 0;
@@ -9920,7 +10717,8 @@ export class Game {
     if (pdd >= std) d -= (pdd - std) * (k / 900 + lv / 1300 + 0.28) * 0.7;
     else if (mobLv <= lv) d -= ((pdd - std) * (lv / 550 + k * 0.00125 + 0.28) * 13) / (lv - mobLv + 13);
     else d -= (pdd - std) * (lv / 550 + k * 0.00125 + 0.28) * 1.3;
-    return Math.max(0, Math.trunc(d));
+    d -= buff('invincible') * d * 0.01;
+    return Math.trunc(clamp(d, 1, 199999));
   }
   /** The standard weapon defence for a class (0 beginner .. 5 pirate) at a level, from Base/StandardPDD.img (gaps take the last value). */
   standardPdd(cls, lv) {
@@ -9981,6 +10779,7 @@ export class Game {
       return;
     }
     this.net.takeDamage({ damage, mobId: m.spawn.id, oid: m.oid, direction: fromRight ? 1 : 0, from });
+    this.catchBreath();
     // a blow ends Hurricane and Rapid Fire (not the skills being charged)
     if (this.keydown && HELD_SHOTS.has(this.keydown.id)) this.endKeydown();
     // Meso Guard: half the blow is paid in mesos (x% of it), as far as they go; the number shows what you lose
@@ -9995,7 +10794,7 @@ export class Game {
     this.vfx?.damage(p, [lost], 'violet');
     if (CHAR_DAM[from]) sfx.play(`Mob/${pad(Number(m.spawn.id), 7)}/${CHAR_DAM[from]}`);
     setExpression(p, 1, HIT_FACE_TIME);
-    this.standUp();
+    this.askStandUp(0);   // a blow that does damage asks to stand up
     // the 270/270 impulse adds to how you were already moving, up to 270 each way: walking or jumping into the
     // monster you're thrown back less, and falling onto it only slows your fall
     const impact = (v, k) => (k > 0 ? (v < k ? Math.min(v + k, k) : v) : (v > k ? Math.max(v + k, k) : v));
@@ -10283,6 +11082,7 @@ export class Game {
   }
   mobAttackLand(m, a, spots) {
     const p = this.player;
+    if (Number(a.info?.tremble)) this.shakeScreen(30, true);   // Zakum's arms, Horntail, Balrog...
     // the client works an attack out only from a monster that may attack (no info/notAttack, not disabled) and, when
     // it is Hypnotized, only from the last one put under it
     if ((hypnotized(m) && m !== this.lastHypnotized) || Number(m.src?.info?.notAttack) || this.mobDisabled(m)) return;
@@ -10390,7 +11190,7 @@ export class Game {
     const here = { cmd: 0, x: Math.round(p.x), y: Math.round(p.y) };
     // leaving a ladder or rope: where you let go, first still on it, then off it
     if (ev?.leave) pair(here, ev.leave, { fh: 0, stance: stanceByte(air, left) });
-    if (ev?.kind === 'jump') this.moveBuf.push({ cmd: 1, rx: Math.round(ev.vx), ry: Math.round(ev.vy), stance: stanceByte(air, left), duration: 0 });
+    if (ev?.kind === 'jump') this.moveBuf.push({ cmd: ev.cmd || 1, rx: Math.round(ev.vx), ry: Math.round(ev.vy), stance: stanceByte(air, left), duration: 0 });
     if (ev?.kind === 'down') {
       pair({ cmd: 15, x: Math.round(ev.x), y: Math.round(ev.y) - 1, ofh: ev.ofh }, { fh: ev.ofh, stance: stanceByte('prone', left) }, { fh: 0, stance: stanceByte(air, left) });
       this.downOfh = ev.ofh;
@@ -10494,6 +11294,28 @@ export class Game {
   }
 
   /** System Option SCREEN SIZE / UI SIZE: the view, the bar and the open windows follow the new size. */
+  /**
+   * System Option MOBILE UI on or off: the HTML interface (ui/mobilehud.js) in place of the status bar, or the bar
+   * again. On, it also shows the touch controls on a touch screen when they were off (Key Setting's AUTO) and puts the
+   * minimap away (it sits where the interface's gauges go; the menu opens it); off, it puts both back as they were.
+   */
+  setMobileUi(on) {
+    settings.mobileUi = !!on; saveSettings();
+    const t = this.controls?.touch, wm = this.windows, mini = wm?.wins.minimap;
+    // System Option open as it switches (where it is switched): MOBILE UI's sheet takes over from the window, or the
+    // window from the sheet, carrying on with what CANCEL puts back
+    const so = wm?.wins.sysopt, soWin = !!so && on && wm.isOpen('sysopt'), soSheet = !on && this.mobileHud?.sheets?.kind === 'sysopt';
+    if (soWin) wm.close(so);
+    if (t && on && t.show === 'off') { t.show = 'auto'; t.byMobileUi = true; saveControls(this.controls); }
+    else if (t && !on && t.byMobileUi) { if (t.show === 'auto') t.show = 'off'; delete t.byMobileUi; saveControls(this.controls); }
+    if (mini && on && wm.isOpen('minimap')) { wm.close(mini); this.miniByMobileUi = true; }
+    else if (mini && !on && this.miniByMobileUi) { if (!wm.isOpen('minimap')) { wm.order.unshift(mini); wm.fit(mini); } this.miniByMobileUi = false; }
+    this.statusBar?.showInput();
+    this.touch?.render();
+    this.mobileHud?.refresh();
+    if (soWin) this.mobileHud?.openSheet('sysopt', true);
+    if (soSheet) { const before = so.before; wm.open('sysopt'); so.before = before; }
+  }
   setResolution() {
     applyResolution();
     this.cam.w = VIEW_W; this.cam.h = VIEW_H;
@@ -10643,6 +11465,7 @@ export class Game {
     this.drawWeddingFx(ctx, cam, this.frameDt || 0);
     this.drawKeyGauge(ctx, cam);
     unshifted(() => map.drawBacks(ctx, view, true));
+    map.drawClouds(ctx, cam);   // info/cloud's clouds, over the whole map
     this.fieldMode?.drawOver?.(ctx, cam);
     this.drawBalloons(ctx, cam);
     this.vfx?.drawWorld(ctx, cam);

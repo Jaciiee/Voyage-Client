@@ -1165,6 +1165,7 @@ export class ChannelSession {
     const SPEED = 0x8000000000n, JUMP = 0x10000000000n, BOOSTER = 0x80000000000n;   // BuffStat.SPEED / JUMP / BOOSTER
     const WATK = 0x100000000n, WDEF = 0x200000000n, MATK = 0x400000000n, MDEF = 0x800000000n, HANDS = 0x4000000000n, AVOID = 0x2000000000n, ACC = 0x1000000000n, MAPLE_WARRIOR = 0x8n, COMBO = 0x20000000000000n, STANCE = 0x10n;   // BuffStat.WATK / ACC / MAPLE_WARRIOR / COMBO / STANCE
     const RIDING = 0x20000000000000n;   // BuffStat.MONSTER_RIDING, in the first mask
+    const INVINCIBLE = 0x800000000000n;   // BuffStat.INVINCIBLE (Invincible's x%: physical damage taken less that)
     const HOMING = 0x80000000000000n;   // Homing Beacon, in the first mask
     const popcount = (big) => { let n = 0; for (let v = big; v; v &= v - 1n) n++; return n; };
     on(S.GIVE_BUFF, (r) => {
@@ -1227,7 +1228,7 @@ export class ChannelSession {
       // Speed / Jump (Haste, Nimble Feet, speed potions...), weapon attack and accuracy: the values come in mask-bit
       // order, so each one's place is the number of set bits below it (all live in the second mask)
       const mask = BigInt.asUintN(64, m2);
-      if (pick === normal && (mask & (SPEED | JUMP | WATK | ACC | WDEF | MATK | MDEF | AVOID | HANDS | BOOSTER))) {
+      if (pick === normal && (mask & (SPEED | JUMP | WATK | ACC | WDEF | MATK | MDEF | AVOID | HANDS | BOOSTER | INVINCIBLE))) {
         r.pos = start;
         const values = Array.from({ length: n }, () => { const v = r.short(); r.int(); r.int(); return v; });
         const at = (bit) => popcount(mask & (bit - 1n));   // the game server lists the plain stats (WATK..JUMP) first
@@ -1240,6 +1241,7 @@ export class ChannelSession {
         if (mask & MDEF) b.mdef = values[at(MDEF)];
         if (mask & HANDS) b.hands = values[at(HANDS)];
         if (mask & AVOID) b.avoid = values[at(AVOID)];
+        if (mask & INVINCIBLE) b.invincible = values[at(INVINCIBLE)];
         if (mask & BOOSTER) b.booster = values[at(BOOSTER)];   // -1 to -4: that much faster
       }
       // Speed Infusion: its value comes first, as an int
@@ -1276,6 +1278,13 @@ export class ChannelSession {
         const values = Array.from({ length: n }, () => { const v = r.short(); r.int(); r.int(); return v; });
         b.ghost = values[popcount(mask >> 32n) + popcount(mask & 0x3n)] || 0;
       }
+      // Infinity (0x200): on, and Concentrate (0x2000): its value, the % taken off what a skill costs in MP
+      if (pick === normal && mask & 0x200n) b.infinity = true;
+      if (pick === normal && mask & 0x2000n) {
+        r.pos = start;
+        const values = Array.from({ length: n }, () => { const v = r.short(); r.int(); r.int(); return v; });
+        b.concentrate = values[popcount(mask >> 32n) + popcount(mask & 0x1fffn)] || 0;
+      }
       // Shadow Stars: its one stat picks the star it throws (the item 2069999 above it)
       if (pick === normal && n === 1 && mask === 0x100n) { r.pos = start; b.shadowStars = r.short(); }
       // Power Stance / Freeze Standing: its one stat is the % chance not to be knocked back
@@ -1300,7 +1309,7 @@ export class ChannelSession {
       const d = { owner: r.int(), oid: r.int(), skill: r.int() };
       r.ubyte(); d.level = r.ubyte();
       const at = r.pos2(); d.x = at.x; d.y = at.y;
-      d.stance = r.ubyte(); r.short(); d.moveType = r.ubyte(); d.canAttack = r.bool(); d.animated = !r.bool();
+      d.stance = r.ubyte(); r.short(); d.moveType = r.ubyte(); d.assist = r.ubyte(); d.canAttack = d.assist !== 0; d.animated = !r.bool();
       this.emit('summonSpawn', d);
     });
     on(S.REMOVE_SPECIAL_MAPOBJECT, (r) => this.emit('summonRemove', r.int(), r.int(), r.ubyte() === 4));
@@ -1340,7 +1349,7 @@ export class ChannelSession {
       else if (effect === 5 && r.available >= 4) this.emit('skillSpecial', id, r.int());   // a skill's special art (Dragon Blood's drain)
       else if (effect === 0x0a && r.available >= 1) this.emit('healNumber', id, r.ubyte());   // HP they recovered (blue number)
       else if (effect === 4 && r.available >= 2) { const e = r.ubyte(); this.emit('petEffect', id, r.ubyte(), e); }   // a pet's level up / evolution
-      else if ([0, 8, 9, 0x0d, 0x0f].includes(effect)) this.emit('foreignEffect', id, effect); // level up / job change / quest clear / card / item level up
+      else if ([0, 7, 8, 9, 0x0d, 0x0f].includes(effect)) this.emit('foreignEffect', id, effect); // level up / portal / job change / quest clear / card / item level up
       else if (effect === 0x10 && r.available >= 4) this.emit('makerResult', id, r.int());   // the Maker: 0 made, 1 failed
       else if (effect === 0x17 && r.available >= 2) this.emit('avatarPicture', r.string(), id);   // a picture on them (fishing)
     });
@@ -1564,7 +1573,13 @@ export class ChannelSession {
     });
     on(S.FORCED_STAT_RESET, () => this.emit('forcedStats', null));
     // what an NPC we control does, as the server sends it back: an action (from 2) or -1, and a line (-1: none)
-    on(S.NPC_ACTION, (r) => { const oid = r.int(); this.emit('npcAction', oid, r.byte(), r.byte()); });
+    // what an NPC does, as the server sends it back: an action (from 2) or -1, a line (-1: none), and for a walking
+    // NPC the stretch it walks (where it starts, then the moves)
+    on(S.NPC_ACTION, (r) => {
+      const oid = r.int(), action = r.byte(), chat = r.byte();
+      const start = r.available >= 5 ? r.pos2() : null, moves = start ? readMovement(r) : null;
+      this.emit('npcAction', oid, action, chat, start, moves);
+    });
 
     on(S.DROP_ITEM_FROM_MAPOBJECT, (r) => {
       const mode = r.ubyte(), oid = r.int(), meso = r.bool(), id = r.int(), owner = r.int(), type = r.ubyte();
@@ -1726,6 +1741,9 @@ export class ChannelSession {
     on(S.PYRAMID_SCORE, (r) => this.emit('pyramidScore', r.byte(), r.int()));
     on(S.LOCK_UI, (r) => this.emit('lockUi', r.bool()));
     on(S.DISABLE_UI, (r) => this.emit('disableUi', r.bool()));
+    // Mu Lung Dojo, a stage cleared: through one of the map's portals, by its place among them (a non-zero first byte
+    // also lets go of the wait on your last request)
+    on(S.DOJO_WARP_UP, (r) => { const free = r.byte() !== 0; this.emit('warpUp', free, r.ubyte()); });
     on(S.CHANGE_CHANNEL, (r) => { r.ubyte(); const ip = Array.from(r.bytes(4)).join('.'); this.emit('changeChannel', { ip, port: r.ushort() }); });
   }
 
@@ -1742,7 +1760,17 @@ export class ChannelSession {
 
   /** activity: (12 + attack) * 2 + facing for an attack, (20 + skill action) * 2 + facing for a skill (with its id/level). */
   /** NPC_ACTION: what an NPC we control is about to do (an action from 2, or -1) and which line it says (-1: none). */
-  npcAction(oid, action, chat) { this.send(new PacketWriter(C.NPC_ACTION).int(oid).byte(action).byte(chat)); }
+  npcAction(oid, action, chat, start = null, moves = null) {
+    const w = new PacketWriter(C.NPC_ACTION).int(oid).byte(action).byte(chat);
+    // a walking NPC's stretch: where it starts, the moves, no keys, and the box they keep within
+    if (moves) {
+      w.pos(start); writeMovement(w, moves);
+      let l = start.x, t = start.y, r = start.x, b = start.y;
+      for (const m of moves) if (m.x !== undefined && m.cmd === 0) { l = Math.min(l, m.x); r = Math.max(r, m.x); t = Math.min(t, m.y); b = Math.max(b, m.y); }
+      w.byte(0).short(l).short(t).short(r).short(b);
+    }
+    this.send(w);
+  }
   /** `fly`: a flyer's AI, whose spot goes in the packet (0x00FFDDCC twice for anything else). */
   moveMob(oid, start, moves, activity = -1, skill = 0, level = 0, fly = null) {
     // each monster counts its own moves
@@ -1832,8 +1860,8 @@ export class ChannelSession {
     if (skillId % 10000000 === 1004) w.short(0);
     this.send(w);
   }
-  /** Heal: which party members it reaches (one bit per party slot), then a delay. */
-  heal(skillId, level, mask) {
+  /** A party skill (Heal, Resurrection): which party members it reaches (one bit per party slot), then a delay. */
+  partyMove(skillId, level, mask) {
     this.send(new PacketWriter(C.SPECIAL_MOVE).int(Date.now() | 0).int(skillId).byte(level).byte(mask).short(0));
   }
   /** A skill starting to charge or wind up (Monster Magnet, Big Bang, Explosion...): its pose, which way you face, speed. */
@@ -2228,14 +2256,14 @@ export class ChannelSession {
   checkCash() { this.send(new PacketWriter(C.CHECK_CASH)); }
   /**
    * CASHSHOP_OPERATION buys (wallet 1 NX credit / 2 maple points / 4 prepaid, each led by a "paid with Maple Points"
-   * byte): 3 an item, 0x1E a package (910xxxx), 6 / 7 an inventory / storage slot item (911xxxx), 8 a character
-   * slot (543xxxx); 0x20 a meso item (SN 8xxxxxxx). Then 5 wish list, 0xD take out, 0xE put in.
+   * byte): 3 an item (Maple Life too), 0x1E a package (910xxxx), 6 / 7 an inventory / storage slot item (911xxxx), 8
+   * a character slot (5430xxx); 0x20 a meso item (SN 8xxxxxxx). Then 5 wish list, 0xD take out, 0xE put in.
    */
   csBuy(wallet, sn, itemId) {
     const k = Math.floor(itemId / 10000), mp = wallet === 2 ? 1 : 0, w = new PacketWriter(C.CASHSHOP_OPERATION);
     if (Math.floor(sn / 10000000) === 8) w.byte(0x20).int(sn);
     else if (k === 911) w.byte(Math.floor(itemId / 1000) === 9110 ? 7 : 6).byte(mp).int(wallet).byte(1).int(sn);
-    else if (k === 543) w.byte(8).byte(mp).int(wallet).int(sn);
+    else if (Math.floor(itemId / 1000) === 5430) w.byte(8).byte(mp).int(wallet).int(sn);
     else if (k === 910) w.byte(0x1E).byte(mp).int(wallet).int(sn);
     else w.byte(3).byte(mp).int(wallet).int(sn).int(0);
     this.send(w);
@@ -2343,15 +2371,22 @@ export class ChannelSession {
    * monster: oid, its id + 4 unread bytes, where it is now and next, the hit delay (ms) and the damage.
    */
   /** A summon's attack: its action (4 attack1, 5 attack2) with facing left in the top bit, then each monster struck. */
-  summonAttack(s, hits, delay, action = 4) {
+  /**
+   * SUMMON_ATTACK: the summon, the time, its action (facing left in the top bit), how many; your position, then the
+   * summon's; for each monster its id and kind, the hit pose it is to take (6 + one of its hit poses, 0xFF with none),
+   * its facing and action, its frame, a byte, where it is and where it was the tick before, when the blow lands and
+   * the damage; then an int.
+   */
+  summonAttack(s, owner, hits, action = 4) {
     const w = new PacketWriter(C.SUMMON_ATTACK).int(s.oid).int(Date.now() | 0).byte((action & 0x7f) | (s.facingRight ? 0 : 0x80)).byte(hits.length);
-    const sx = Math.round(s.x), sy = Math.round(s.y);
-    w.short(sx).short(sy).short(sx).short(sy);
-    for (const { mob, dmg } of hits) {
-      const at = { x: Math.round(mob.x), y: Math.round(mob.y) };
-      w.int(mob.oid).int(Number(mob.spawn?.id) || 0).int(0).pos(at).pos(at).short(delay).int(dmg);
+    w.short(owner.x).short(owner.y).short(Math.trunc(s.x)).short(Math.trunc(s.y));
+    for (const { mob, dmg, delay } of hits) {
+      const hitPoses = Object.keys(mob.src || {}).filter((k) => /^hit\d+$/.test(k)).length, st = mob.stance || 0;
+      w.int(mob.oid).int(Number(mob.spawn?.id) || 0).byte(hitPoses ? 6 + Math.floor(Math.random() * hitPoses) : 0xff)
+        .byte(((st & 1) << 7) | ((st >> 1) & 0x7f)).byte(mob.anims?.[mob.state]?.i || 0).byte(0)
+        .pos({ x: Math.trunc(mob.x), y: Math.trunc(mob.y) }).pos({ x: Math.trunc(mob.prevX ?? mob.x), y: Math.trunc(mob.prevY ?? mob.y) }).short(delay).int(dmg);
     }
-    this.send(w);
+    this.send(w.int(0));
   }
   /** USE_UPGRADE_SCROLL: the scroll's USE slot, the equip's slot (negative = worn), 2 with a White Scroll (else 1), Legendary Spirit */
   useScroll(scrollSlot, equipSlot, white, legendary) { this.send(new PacketWriter(C.USE_UPGRADE_SCROLL).int(Date.now() | 0).short(scrollSlot).short(equipSlot).short(white ? 2 : 1).byte(legendary ? 1 : 0)); }

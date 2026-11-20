@@ -157,6 +157,8 @@ On start the server also packs your character, NPC, monster and tile-set files i
 
 Open `http://<host>:3000`, log in, and pick a channel and a character. 🎮
 
+On a supported browser, install Voyage Client from the browser's **Install app** or **Add to Home Screen** option. Installation requires HTTPS, or `localhost` during development. The service worker caches the app shell for launch, but playing still requires a connection to Voyage-Client, Voyage-Server and the game assets; gameplay is not available offline.
+
 ## ⚙️ Settings
 
 `conf/client.conf` (TOML) holds every setting. The server creates it from the tracked `conf/client.conf.dist` on first start; that template documents each key and its default. `client.conf` is gitignored, so your settings stay local.
@@ -214,6 +216,9 @@ Voyage-Client/
 ├── cache/                # sheets the server makes from your assets on start: gitignored
 ├── public/
 │   ├── index.html
+│   ├── manifest.webmanifest
+│   ├── service-worker.js
+│   ├── icons/              # install and home-screen icons
 │   ├── style.css
 │   ├── FrameWorker.js    # worker that puts character frames together off the page's thread (/fps worker)
 │   └── Voyage.js         # built client bundle: gitignored, generated at build/boot
@@ -296,7 +301,7 @@ With [Voyage-Editor](https://github.com/comcad/Voyage-Editor). Publishing writes
 
 ## 💬 Community
 
-Questions, feedback, or want to help test? Come hang out on Discord.
+Questions, feedback, or want to help test? Come hang out on Discord. Before opening a pull request, please read [CONTRIBUTING.md](CONTRIBUTING.md).
 
 [![Discord](https://img.shields.io/badge/Discord-discord.gg%2FSCVxm6tB4g-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/SCVxm6tB4g)
 

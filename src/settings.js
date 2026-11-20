@@ -1,28 +1,33 @@
 /**
  * System Option choices, kept on this device (storage and a cookie, see kept.js):
  *   quality   0..1  canvas density, NORMAL (1 pixel per game pixel) .. BEST (the screen's own density)
- *   hpAlert / mpAlert  0..1  the gauge flashes below this share (0 = never)
+ *   hpAlert / mpAlert  0 .. 0.95 in steps of 0.05: the gauge flashes, and a pet with the potion pouch drinks, below
+ *              this share (0 = never)
  *   shake     shake the screen with skills that do
  *   mobInfo   0 nothing / 1 HP bar / 2 name and HP bar, over monsters you hit
  *   resolution  the game's screen size, 'WxH'
  *   uiScale   the interface's size, 1 .. 1.8 in tenths (held to what the screen size allows)
  *   zoom      how close the view is on your character, 1 .. 2 in tenths (the interface keeps its size)
- *   fit       stretch the game to fill the window, without black bars
+ *   fit       stretch the game to fill the window, without black bars (on unless turned off)
  *   fps       'vsync' (every screen refresh), 60 or 30: how many frames a second are drawn
  *   fpsMeter  the /fps performance meter is shown
  *   hudMeter  the EXP/hr & DPS live meter widget is shown
  *   lootBeams rare drop loot beams & toast notifications are shown
+ *   mobileUi  MOBILE UI: an HTML interface for phones in place of the status bar (ui/mobilehud.js), and window buttons
+ *             taking taps just outside their art (wzui.js nearButton)
  */
 import { readKept, writeKept } from './kept.js';
 
 const KEY = 'maple.sysopt';
-export const DEFAULTS = { quality: 1, hpAlert: 0.2, mpAlert: 0.2, shake: true, mobInfo: 2, resolution: '800x600', uiScale: 1, zoom: 1, fit: false, fps: 'vsync', fpsMeter: false, hudMeter: true, lootBeams: true };
+export const DEFAULTS = { quality: 1, hpAlert: 0.2, mpAlert: 0.2, shake: true, mobInfo: 2, resolution: '800x600', uiScale: 1, zoom: 1, fit: false, fps: 'vsync', fpsMeter: false, hudMeter: true, lootBeams: true, mobileUi: false };
 export const MOB_INFO = ['Do not mark', 'Mark HP only', 'Mark name and HP'];
 /** FRAME RATE's choices, in the order the list shows them. */
 export const FPS_CHOICES = [['vsync', 'VSync'], [60, '60 FPS'], [30, '30 FPS']];
 
 export const settings = { ...DEFAULTS };
 try { Object.assign(settings, JSON.parse(readKept(KEY) || '{}')); } catch { /* bad data: the defaults */ }
+// an alert outside 0 .. 95% (one kept from before it stopped at 95%) is the default again
+for (const k of ['hpAlert', 'mpAlert']) if (!(settings[k] >= 0 && settings[k] <= 0.95)) settings[k] = DEFAULTS[k];
 
 export function saveSettings() {
   writeKept(KEY, JSON.stringify(settings));

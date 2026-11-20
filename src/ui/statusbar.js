@@ -173,6 +173,7 @@ export class StatusBar {
   /** Opens the input: minimized, the log's line moves up a row for it (state 2). */
   focusChat(prefix = '') {
     if (this.hidden) return;
+    if (settings.mobileUi) { this.game.mobileHud?.openSay(prefix); return; }   // MOBILE UI's own chat line
     if (this.chatState === 1) this.setChatState(2);
     if (prefix && !this.chat.value) this.chat.value = prefix;
     this.chat.focus();
@@ -183,7 +184,7 @@ export class StatusBar {
   }
   /** Gone while a scene locks the UI. */
   setHidden(on) { this.hidden = on; this.showInput(); if (on) this.chat.el.blur(); }
-  showInput() { this.chat?.show(!this.hidden && this.chatState !== 1); }
+  showInput() { this.chat?.show(!this.hidden && !settings.mobileUi && this.chatState !== 1); }
   get typing() { return document.activeElement === this.chat?.el; }
 
   // ------------------------------------------------------------------ chat log
@@ -325,9 +326,9 @@ export class StatusBar {
     const keys = CHAT_TARGETS.map((t) => t.key).filter((k) => k !== 'group' && (k !== 'whisper' || this.whisperTo));
     this.chatTarget = keys[(keys.indexOf(this.chatTarget) + 1) % keys.length];
   }
-  /** A keymap chat key: the input opens with that target (Whisper asks who to). */
+  /** A keymap chat key: the input opens with that target (Whisper asks who to, To Group which group). */
   openChat(target) {
-    if (target === 'whisper') { this.chooseTarget('whisper'); return; }
+    if (target === 'whisper' || target === 'group') { this.chooseTarget(target); return; }
     this.chatTarget = target;
     this.focusChat();
   }
@@ -419,12 +420,12 @@ export class StatusBar {
       case 'BtStat': g.windows.toggle('stat'); break;
       case 'BtSkill': g.windows.toggle('skill'); break;
       case 'BtQuest': g.windows.toggle('quest'); break;
-      case 'BtChannel': g.windows.toggle('channel'); break;
+      case 'BtChannel': g.channelMenu(); break;
       case 'BtComm': g.windows.toggle('userlist'); break;
       case 'BtMobbook': g.windows.toggle('monsterbook'); break;
       case 'BtMessenger': g.windows.toggle('messenger'); break;
-      case 'BtGameOpt': g.windows.toggle('gameopt'); break;
-      case 'BtSysOpt': g.windows.toggle('sysopt'); break;
+      case 'BtGameOpt': if (!g.mobileHud?.openSheet('gameopt')) g.windows.toggle('gameopt'); break;   // MOBILE UI: its own sheet
+      case 'BtSysOpt': if (!g.mobileHud?.openSheet('sysopt')) g.windows.toggle('sysopt'); break;   // MOBILE UI: its own sheet
       case 'BtQuit': g.windows.confirm('Are you sure you want to quit the game?').then((ok) => { if (ok) g.leave(); }); break;
       default: g.notice('This feature is not available yet.');
     }
@@ -457,6 +458,7 @@ export class StatusBar {
   }
   /** The tooltip for the quick slot under the mouse: the item's, or the skill's. */
   quickTip(x, y) {
+    if (settings.mobileUi) return null;
     x -= this.ox;
     // the buttons' hints (String/ToolTipHelp.img/Game/Button): Cash Shop, Menu, Key Config., Show / Hide Quick Slot
     const bt = this.allButtons().find((b) => !this.menu?.buttons.includes(b) && b.hit(x, y));
@@ -504,6 +506,7 @@ export class StatusBar {
 
   /** A skill, or a Use item, dropped from a window onto a quick slot binds it to that key. */
   dropOnQuickSlot(x, y, c) {
+    if (settings.mobileUi) return;
     x -= this.ox;
     if (!this.quickOpen || this.inMenu(x, y)) return;
     const i = this.slotAt(x, y);
@@ -534,6 +537,7 @@ export class StatusBar {
   // ------------------------------------------------------------------ input
   /** Canvas-space pointer events from Game. Returns true when the UI took the event. */
   pointer(type, x, y) {
+    if (settings.mobileUi) return false;   // hidden for MOBILE UI
     x -= this.ox;
     this.mouse = { x, y };
     // an open pop-up menu sits on top: what's under it doesn't take the mouse
@@ -575,9 +579,18 @@ export class StatusBar {
     if (x < TMENU.x || x >= TMENU.x + TMENU.w || y < top || y >= top + CHAT_TARGETS.length * TMENU.row) return -1;
     return Math.floor((y - top) / TMENU.row);
   }
-  /** A target from the list; Whisper first asks who to (keeping the old target if you cancel). */
+  /**
+   * A target from the list; Whisper first asks who to, To Group which buddy group ("Default Group", then the others
+   * by name), each keeping the old target if you cancel.
+   */
   async chooseTarget(key) {
     sfx.play('UI/BtMouseClick');
+    if (key === 'group') {
+      const names = [...new Set((this.game.buddies || []).map((b) => b.group || 'Default Group'))].filter((n) => n !== 'Default Group').sort();
+      const group = await this.game.windows.askGroup(['Default Group', ...names], this.chatGroup);
+      if (!group) return;
+      this.whisperTo = ''; this.chatGroup = group;
+    }
     if (key === 'whisper') {
       const w = this.game.windows, name = (await w.askWhisper(this.whisperTo || '', this.whisperNames || []))?.trim();
       if (!name) return;
@@ -610,7 +623,7 @@ export class StatusBar {
     return !!m && x >= m.x && x < m.x + m.bg._w && y >= m.y && y < m.y + m.bg._h;
   }
 
-  contains(x, y) { return this.hit(x - this.ox, y); }
+  contains(x, y) { return !settings.mobileUi && this.hit(x - this.ox, y); }
   hit(x, y) {
     if (y >= this.y && x >= 0 && x < BAR_W) return true;
     // the open log (and the line over the bar while typing) takes clicks; above it they reach the map
@@ -639,7 +652,7 @@ export class StatusBar {
 
   draw(ctx) {
     const s = this.game.stats, S = this.S;
-    if (!s || !S) return;
+    if (!s || !S || settings.mobileUi) return;   // MOBILE UI draws its own (ui/mobilehud.js)
     const img = (n) => this.assets.image(n);
     const y = this.y;
     this.restoreChat();

@@ -1,5 +1,5 @@
 import { pad, isCanvas, frames } from './assets.js';
-import { Footholds, PHYS, accelerate, approach, swimVelocity } from './physics.js';
+import { Footholds, PHYS, accelerate, approach, swimVelocity, groundVelocity } from './physics.js';
 import { BASE_W, BASE_H, snapPx, PIXEL_SCALE } from './view.js';
 import { roundTo, pathKeys, hermite } from './movepath.js';
 
@@ -122,16 +122,24 @@ export class GameMap {
     this.fh.fs = Number(data.info?.fs) || 1;   // the map's drag (1 when unset)
     this.ladders = Object.entries(data.ladderRope || {}).map(([id, l]) => ({ ...l, id: Number(id) }));   // the id goes in movement
 
-    // Bounds: VR* when present, else derived from footholds.
-    const i = this.info;
-    this.bounds = i.VRLeft !== undefined
-      ? { left: i.VRLeft, right: i.VRRight, top: i.VRTop, bottom: i.VRBottom }
-      : { left: this.fh.left + 10, right: this.fh.right - 10, top: this.fh.top - 360, bottom: this.fh.bottom + 110 };
+    // The view's limits: each VR* the map has, and for each one it hasn't, the client's own fallback: the ground's
+    // extent (the footholds' left + 30, right - 30, top - 75 and bottom + 10) widened by 20, 20, 60 and 100.
+    const i = this.info, f = this.fh;
+    this.bounds = { left: i.VRLeft ?? f.left + 10, right: i.VRRight ?? f.right - 10, top: i.VRTop ?? f.top - 135, bottom: i.VRBottom ?? f.bottom + 110 };
 
     const [strMap, strNpc, strMob, helper] = await Promise.all([
       a.json('String/Map.img'), a.json('String/Npc.img'), a.json('String/Mob.img'), a.json('Map/MapHelper.img'),
     ]);
     this.name = findMapName(strMap, this.id);
+    this.makeClouds(helper?.weather?.cloud);
+    // info/effect (Aqua Road's Bubbling): Effect/MapEff.img/<it>, on everyone in the map (see Game.drawMapEffect)
+    if (this.info.effect) a.json('Effect/MapEff.img').then(async (e) => {
+      const node = e?.[String(this.info.effect)];
+      if (!node) return;
+      const anim = new Anim(node, true);
+      await a.preload(anim.frames);
+      this.mapEffFrames = anim.frames;
+    });
 
     onStatus?.('Loading backgrounds...');
     for (const [k, b] of Object.entries(data.back || {})) {
@@ -239,6 +247,18 @@ export class GameMap {
       return x >= p.x - hw && x < p.x + hw && y >= p.y - hh && y < p.y + hh;
     });
   }
+  /**
+   * The touch portal - type 3, 9, 12 or 13, the ones the client keeps on a list of their own - whose hRange x vRange box
+   * holds this point, last listed first: the one that counts where you stand.
+   */
+  touchPortalAt(x, y) {
+    x = Math.trunc(x); y = Math.trunc(y);
+    return this.portals.findLast((p) => {
+      if (p.pt !== 3 && p.pt !== 9 && p.pt !== 12 && p.pt !== 13) return false;
+      const hw = Math.trunc((p.hRange ?? 100) / 2), hh = Math.trunc((p.vRange ?? 100) / 2);
+      return x >= p.x - hw && x < p.x + hw && y >= p.y - hh && y < p.y + hh;
+    });
+  }
 
   /**
    * Hidden portals show while you are within [x-100, x+100) x [y-50, y+50) of one: portalStart, then portalContinue
@@ -266,9 +286,50 @@ export class GameMap {
     return this.ladders.find((l) => l.x >= left && l.x <= right && top <= l.y2 && l.y1 <= bottom);
   }
 
+  /**
+   * info/cloud: MapHelper.img/weather/cloud clouds scattered over the ground's extent (its walls, ceiling and floor)
+   * widened by 200px all round, 10-59 of them (more on a bigger map): each a picture of the set picked at random, a
+   * speed s of 50-149, an alpha of 140-219, anywhere in that area. Each drifts right at s/3 px/s (and up or down a little,
+   * the slowest rising, the fastest sinking), coming back in at the other side when it leaves the area, fading in over
+   * its first 3s. They are drawn over the whole map, the front backgrounds too, moving with it.
+   */
+  makeClouds(set) {
+    this.clouds = [];
+    if (!Number(this.info.cloud) || !set) return;
+    const pics = Object.keys(set).filter((k) => !k.startsWith('_')).map((k) => set[k]);
+    if (!pics.length) return;
+    const f = this.fh, rnd = (n) => Math.floor(Math.random() * n);
+    const L = f.wallL - 200, T = f.ceiling - 200, W = f.wallR - f.wallL + 400, H = f.ground - f.ceiling + 400;
+    if (!(W > 0 && H > 0)) return;
+    this.cloudBox = { L, T, W, H };
+    const n = rnd(20) + 10 + Math.trunc(30 * Math.min(1, (W * H) / 9000000));
+    for (let i = 0; i < n; i++) {
+      const pic = pics[rnd(pics.length)], r1 = rnd(100), s = r1 + 50, alpha = (rnd(80) + 140) / 255;
+      const x = L + rnd(W), y = T + rnd(H);
+      this.clouds.push({ pic, x, y, vx: (10 * s) / 30, vy: Math.trunc((r1 - 60) / 4) / 30, alpha, t: 0 });
+    }
+    this.assets.preload(pics);
+  }
+  /** The clouds, where they are now (see makeClouds). */
+  drawClouds(ctx, cam) {
+    for (const c of this.clouds || []) {
+      const img = this.assets.image(c.pic);
+      if (!img) continue;
+      const o = c.pic.origin || [0, 0];
+      ctx.save(); ctx.globalAlpha *= c.alpha * Math.min(1, c.t / 3);
+      ctx.drawImage(img, Math.round(c.x - o[0] - cam.x), Math.round(c.y - o[1] - cam.y));
+      ctx.restore();
+    }
+  }
   update(dt) {
     const ms = dt * 1000;
     this.scroll += dt;
+    const B = this.cloudBox;
+    for (const c of this.clouds || []) {
+      c.t += dt; c.x += c.vx * dt; c.y += c.vy * dt;
+      if (c.x >= B.L + B.W) c.x -= B.W; else if (c.x < B.L) c.x += B.W;
+      if (c.y >= B.T + B.H) c.y -= B.H; else if (c.y < B.T) c.y += B.H;
+    }
     for (const b of this.backs) {
       b.anim.update(ms);
       const f = b.fade;
@@ -549,11 +610,33 @@ const MOB_SPEED = 0x40, MOB_STUN = 0x80, MOB_FREEZE = 0x100, MOB_WEB = 0x20000;
  * monster moves on to its next one. A status of that kind coming or going sets the counter to 1 and moves on at once.
  */
 const STATUS_TURN = { n: 0, every: 22, tick: 30 };
-/** A monster AI wait: `base` + up to `spread` ms, counted in 90ms units of its 30ms ticks (so a third as long). */
 /** What a planned path's stand-in leaves behind for the path to play out rather than taking over. */
 const PLAYED = new Set(['x', 'y', 'fh', 'state', 'facingRight', 'prevX', 'prevY', 'setState']);
-/** How much of a path is still to play, in ms. */
-const aiWait = (base, spread) => (Math.floor((base + Math.random() * spread) / 90) * 30) / 1000;
+/** The controller of a monster that doesn't fly works in steps of 90ms: its AI decides, then it moves 90ms. */
+const MOB_STEP = 90;
+const rnd = (n) => Math.floor(Math.random() * n);
+/** A monster AI wait: `base` + up to `spread` ms, as a count of its 90ms steps. */
+const aiSteps = (base, spread) => Math.floor((base + rnd(spread)) / MOB_STEP);
+/** Its speed as a path point gives it (whole px/s, cut toward zero): along its floor on the ground, as it is in the air. */
+function pathSpeed(s) {
+  const f = s.fh, v = s.vx || 0;
+  return [Math.trunc(v), Math.trunc(f ? (f.x2 > f.x1 ? (v * (f.y2 - f.y1)) / (f.x2 - f.x1) : 0) : s.vy || 0)];
+}
+/**
+ * A step of a planned path, `ms` long: where it ends (whole pixels, cut toward zero) with the speed it has there,
+ * merged into the point before while its floor, pose and the signs of its speeds stay the same. A step on the ground
+ * over which its speed changed (`v0` at its start: a landing, a change of slope, setting off, stopping) is a point of
+ * its own, and nothing after is merged into it: played as one stretch with what follows, the speed it had would carry
+ * it on through the floor or past where it stopped.
+ */
+const ALONE = Symbol('alone');
+function recordStep(moves, s, v0, stance, ms) {
+  const x = Math.trunc(s.x), y = Math.trunc(s.y), [vx, vy] = pathSpeed(s), fh = s.fh?.id || 0, last = moves[moves.length - 1];
+  const alone = !!s.fh && (vx !== v0[0] || vy !== v0[1]);
+  if (!alone && last && last.cmd === 0 && !last[ALONE] && last.fh === fh && last.stance === stance && Math.sign(last.vx) === Math.sign(vx) && Math.sign(last.vy) === Math.sign(vy)) {
+    Object.assign(last, { x, y, vx, vy }); last.duration += ms;
+  } else moves.push({ cmd: 0, x, y, vx, vy, fh, stance, duration: ms, [ALONE]: alone });
+}
 
 /**
  * A Maple TV NPC (info/MapleTV) is only the cabinet; the client fills its screens from UI/MapleTV.img: the top one
@@ -615,8 +698,8 @@ export class Life {
     for (const k of this.actions) this.anims[k] = new Anim(src[k], false);
     if (kind === 'Npc') {
       // its speed stat is speed + 70 (capped at 140) percent of the walk speed; only one with a move animation wanders
-      this.speed = Math.min(140, Math.max(0, (info.speed ?? 0) + 70)) * PHYS.walk / 100;
-      this.walks = !!src.move && spawn.rx1 > spawn.rx0;
+      this.speed = Math.max(10, Math.min(140, (info.speed ?? 0) + 70)) * PHYS.walk / 100;
+      this.walks = !!src.move;   // it walks within rx0-rx1 (in place when they are the same)
       this.picks = []; this.actT = 3 + Math.random() * 6; this.moveT = 0; this.dir = 0;
     }
     if (kind === 'Npc') for (const a of Object.values(this.anims)) a.defaultDelay = 180;   // the client's NPC frame default
@@ -637,7 +720,12 @@ export class Life {
     this.status = { first: 0, second: 0 };
     this.statusArt = new Map();
     this.state = this.anims.stand ? 'stand' : this.anims.fly ? 'fly' : Object.keys(this.anims)[0];
-    this.timer = 0;
+    // its AI: the way it means to go (aiDir) and how many 90ms steps until it decides again (aiT); `dir` is the way
+    // it is pushed now, which its edges can turn round without its AI changing its mind
+    this.aiDir = 0; this.aiT = 0;
+    this.jumpKey = false; this.jumpAsked = false; this.jumpY = 0;
+    // the group of the floor it was placed on: a monster that jumps keeps to it and the group it is on
+    this.homeZ = fh?.zMass ?? 0;
     this.aggro = null;        // the character it chases once hit (or told to by the server); see chase()
     this.chaseT = 0;
     this.vx = 0; this.vy = 0;
@@ -725,7 +813,8 @@ export class Life {
   /**
    * Its path plays on the client's 30ms clock, a tick ahead of the screen, and is drawn between the last two ticks
    * (rounded half away from zero). One we control plans its next path when nothing is left to play, once the server
-   * has answered the last one it sent (MOVE_MONSTER_RESPONSE); meanwhile it waits where its path ended.
+   * has answered the last one it sent (MOVE_MONSTER_RESPONSE); meanwhile it waits where its path ended. Offline, every
+   * monster plans its own.
    */
   playPath(dt, keepPose = false) {
     let b = this.pb;
@@ -738,7 +827,8 @@ export class Life {
     b.acc += dt * 1000;
     while (b.acc > 0) {
       b.acc -= 30;
-      if (!this.pathTick() && this.controlled && this.online && !this.moveWait && !keepPose && !this.dying) { this.x = b.cur.x; this.y = b.cur.y; this.planPath(); }
+      const waiting = this.kind === 'Npc' ? this.npcWaiting : this.moveWait;
+      if (!this.pathTick() && (this.online ? this.controlled && !waiting : true) && !keepPose && !this.dying) { this.x = b.cur.x; this.y = b.cur.y; this.planPath(); }
     }
     this.keepPose = false;
     const k = -b.acc / 30;
@@ -749,6 +839,13 @@ export class Life {
   /** A path point's pose (its stance: 1 walk, 2 stand, 3 jump, 6 fly, 16 chase; bit 0 faces left) and floor. */
   takePose(s) {
     this.facingRight = !(s.stance & 1);
+    if (this.kind === 'Npc') {
+      // standing (4) or walking; an action playing keeps its pose until it ends
+      this.walkPose = s.stance >> 1 === 2 || !this.anims.move ? 'stand' : 'move';
+      if (!this.acting) this.setState(this.walkPose);
+      if (s.fh) this.fh = this.footholds.get(s.fh) || this.fh;
+      return;
+    }
     const pose = { 1: 'move', 2: 'stand', 3: 'jump', 6: 'fly', 16: this.flying && !this.anims.chase ? 'fly' : 'chase' }[s.stance >> 1];
     if (pose) this.setState(this.anims[pose] ? pose : pose === 'stand' ? this.state : this.flying ? 'fly' : 'move');
     if (!this.flying) this.fh = s.fh ? this.footholds.get(s.fh) || this.fh : null;
@@ -759,24 +856,24 @@ export class Life {
     return (action << 1) | (this.facingRight ? 0 : 1);
   }
   /**
-   * One we control works out where it will be over the next second, as the client does: its AI and movement run in
-   * 30ms ticks on a stand-in until a second is planned, the path (a point for each stretch in one pose, floor and
-   * direction, with its speed) goes to the server for everyone else, and it then plays that path itself - so every
-   * client shows it moving the same way at the same time. Its AI picks up from where the path ends.
+   * One we control works out where it will be next, as the client does: its AI and movement run in 90ms steps on a
+   * stand-in until at least a second is planned with some of it on the ground (55 steps at most), the path (a point
+   * for each stretch in one pose, floor and direction, with its speed; a jump as a point of its own) goes to the
+   * server for everyone else, and it then plays that path itself - so every client shows it moving the same way at
+   * the same time. Its AI picks up from where the path ends.
    */
   planPath() {
+    if (this.kind === 'Npc') { this.npcPlan(); return; }
     if (this.flying) { this.planFlyPath(); return; }
-    const sim = Object.create(this), moves = [], start = { x: Math.round(this.x), y: Math.round(this.y) };
+    const sim = Object.create(this), moves = [], start = { x: Math.trunc(this.x), y: Math.trunc(this.y) };
     sim.setState = function (st) { if (this.anims[st]) this.state = st; };
-    for (let t = 0; t < 1000; t += 30) {
-      const px = sim.x, py = sim.y;
-      sim.step(0.03);
-      const x = Math.round(sim.x), y = Math.round(sim.y), vx = Math.round((sim.x - px) / 0.03), vy = Math.round((sim.y - py) / 0.03);
-      const fh = sim.fh?.id || 0, stance = sim.stance, last = moves[moves.length - 1];
-      if (last && last.fh === fh && last.stance === stance && Math.sign(last.vx) === Math.sign(vx) && Math.sign(last.vy) === Math.sign(vy)) {
-        Object.assign(last, { x, y, vx, vy }); last.duration += 30;
-      } else moves.push({ cmd: 0, x, y, vx, vy, fh, stance, duration: 30 });
+    sim.onJump = (s) => moves.push({ cmd: 1, rx: Math.trunc(s.vx), ry: Math.trunc(s.vy), stance: s.stance, duration: 0 });
+    for (let t = 0, n = 0; n < 55 && !(t >= 1000 && moves.some((m) => m.cmd === 0 && m.fh)); n++, t += MOB_STEP) {
+      const v0 = pathSpeed(sim);
+      sim.mobStep();
+      recordStep(moves, sim, v0, sim.stance, MOB_STEP);
     }
+    delete sim.onJump;
     for (const k of Object.keys(sim)) if (!PLAYED.has(k)) this[k] = sim[k];
     this.queueOwn(moves);
     this.onPath?.(this, start, moves);
@@ -919,7 +1016,7 @@ export class Life {
     this.facingRight = fromRight;
     if (this.anims.hit1) { this.setState('hit1'); this.hitTimer = Math.max(0.3, this.anims.hit1.frames.reduce((t, f) => t + (f.delay || 100), 0) / 1000); }
     // fromRight: the blow came from the right, so it slides away to the left
-    if (this.controlled) this.cutPath();
+    if (this.controlled || !this.online) this.cutPath();
     // a flyer we control is pushed straight back (see planFlyHit)
     if (this.flying) this.flyPush = { v: (fromRight ? -1 : 1) * (strong ? 300 : 130), brake: strong ? 200 : 400 };
     // one that can't move (no move, jump or fly: Horntail's and Zakum's parts) isn't pushed
@@ -934,34 +1031,41 @@ export class Life {
   /**
    * One we control was struck: what the client sends then, element for element - the blow's push (type 2: no time,
    * the speed it sets off at), 300ms of sliding back, standing for the rest of its hit pose (in the air: falling
-   * through it, pushed sideways by the blow), then its own movement
-   * until at least a second is planned (1.65s at most, ending on the ground) - in the stance it had before the blow.
-   * It then plays that same plan itself, so everyone sees one thing.
+   * through it, pushed sideways by the blow), then its own movement in its 90ms steps until at least a second is
+   * planned with some of it on the ground (55 of those steps at most) - in the stance it had before the blow. It then
+   * plays that same plan itself, so everyone sees one thing.
    */
   planHit(hitMs, stance) {
     if (this.flying) { this.planFlyHit(stance); return; }
-    const sim = Object.create(this), start = { x: Math.round(this.x), y: Math.round(this.y) };
+    const sim = Object.create(this), start = { x: Math.trunc(this.x), y: Math.trunc(this.y) };
     sim.setState = function (st) { if (this.anims[st]) this.state = st; };
     const moves = [], hold = Math.max(300, hitMs);
     if (sim.recoil) moves.push({ cmd: 2, rx: Math.round(sim.recoil), ry: 0, stance, duration: 0 });
     const add = (px, py, st, t) => {
       const x = Math.round(sim.x), y = Math.round(sim.y), vx = Math.round((sim.x - px) / 0.03), vy = Math.round((sim.y - py) / 0.03);
-      const fh = sim.fh?.id || 0, last = moves[moves.length - 1], phase = t < 300 ? 0 : t < hold ? (sim.hitLanded ? 3 : 1) : 2;
+      const fh = sim.fh?.id || 0, last = moves[moves.length - 1], phase = t < 300 ? 0 : sim.hitLanded ? 3 : 1;
       if (last && last.cmd === 0 && last.phase === phase && last.fh === fh && last.stance === st && Math.sign(last.vx) === Math.sign(vx) && Math.sign(last.vy) === Math.sign(vy)) {
         Object.assign(last, { x, y, vx, vy }); last.duration += 30;
       } else moves.push({ cmd: 0, x, y, vx, vy, fh, stance: st, duration: 30, phase });
     };
-    for (let t = 0; t < 1650; t += 30) {
-      if (t >= 1000 && (sim.fh || sim.flying)) break;
+    let t = 0;
+    for (; t < hold; t += 30) {
       const px = sim.x, py = sim.y;
       if (t < 300) { if (sim.recoil && sim.fh) sim.recoilStep(0.03); else sim.hitFall(0.03); add(px, py, stance, t); continue; }
-      if (t < hold) { if (sim.hitLanded && sim.recoil && sim.fh) sim.recoilStep(0.03); else sim.hitFall(0.03); add(px, py, stance, t); continue; }
-      if (sim.state === 'hit1') { sim.setState(sim.flying ? 'fly' : 'stand'); sim.recoil = 0; }
-      sim.step(0.03); add(px, py, sim.stance, t);
+      if (sim.hitLanded && sim.recoil && sim.fh) sim.recoilStep(0.03); else sim.hitFall(0.03);
+      add(px, py, stance, t);
     }
     // the slide ends where it got to in 300ms; standing, it no longer moves (falling, or sliding on from where it
     // landed - phase 3 - it keeps its speed)
     for (const m of moves) { if (m.phase === 1 && m.fh) { m.vx = 0; m.vy = 0; } delete m.phase; }
+    if (sim.state === 'hit1') { sim.setState('stand'); sim.recoil = 0; }
+    sim.onJump = (s) => moves.push({ cmd: 1, rx: Math.trunc(s.vx), ry: Math.trunc(s.vy), stance: s.stance, duration: 0 });
+    for (let n = 0; n < 55 && !(t >= 1000 && moves.some((m) => m.cmd === 0 && m.fh)); n++, t += MOB_STEP) {
+      const v0 = pathSpeed(sim);
+      sim.mobStep();
+      recordStep(moves, sim, v0, sim.stance, MOB_STEP);
+    }
+    delete sim.onJump;
     for (const k of Object.keys(sim)) if (!PLAYED.has(k) && k !== 'recoil') this[k] = sim[k];
     this.recoil = 0;   // the plan carries the slide
     this.queueOwn(moves);
@@ -1107,22 +1211,32 @@ export class Life {
     if (this.aggro !== this.chased) { this.chased = this.aggro; this.chaseT = 180 + Math.random() * 60; }
     if (this.aggro && (this.chaseT -= dt) <= 0) this.aggro = this.chased = null;
     if ((this.fh || this.flying) && this.tryAttack(dt)) { this.cutPath(); return; }   // an attack cuts its path short
-    if (this.online) { this.playPath(dt); return; }
-    this.step(dt);
+    // one we control (or any, offline) plays the paths it plans
+    this.playPath(dt);
   }
-  /** Its AI and movement for one step of `dt` seconds. */
-  step(dt) {
-    if (!this.canMove) { this.faceTarget(dt); return; }
-    if (this.flying) { this.flyStep(dt); return; }
-    if (!this.fh) {                                   // mid-jump (or knocked off a ledge)
-      // in water it sinks (no gravity), still pushed the way it was going
-      if (this.swimming()) { swimVelocity(this, this.dir || 0, 0, dt); this.footholds.fall(this, dt, null, true); }
-      else this.footholds.fall(this, dt);
+  /**
+   * One 90ms step of a monster that doesn't fly, as the client's controller runs it: its AI (by how it moves: stays
+   * put, walks, or walks and jumps), then a jump it asked for, then its movement over the whole 90ms.
+   */
+  mobStep() {
+    const type = this.canJump ? 2 : this.canMove ? 1 : 0;
+    if (type === 0) this.aiStay();
+    else if (type === 1) this.aiWalk();
+    else this.aiJump();
+    if (this.jumpKey) { this.jumpKey = false; this.jumpNow(); }
+    if (!this.canMove) return;
+    const dt = MOB_STEP / 1000;
+    if (!this.fh) {                                   // mid-jump (or off a ledge)
+      // one that jumps is kept over its ground in the air (see jumpRange); in water it sinks (no gravity), still
+      // pushed the way it was going
+      const lim = type === 2 ? this.jumpRange(this.zMass) : null, hold = (x) => this.holdInRange(x, lim);
+      if (this.swimming()) { swimVelocity(this, this.dir || 0, 0, dt); this.footholds.fall(this, dt, null, true, null, hold); }
+      else this.footholds.fall(this, dt, null, false, null, hold);
       if (this.fh) { this.vx = 0; this.walkState(); }
       return;
     }
-    this.think(dt);
-    if (this.fh && this.dir && this.state !== 'stand') this.walkStep(dt);
+    if (this.dir) this.walkOn(dt, type);
+    else this.vx = 0;
   }
   /** Set it on `target` (or a fresh 3-4 minutes on the same one). */
   chase(target) { this.aggro = this.chased = target; this.chaseT = 180 + Math.random() * 60; }
@@ -1290,167 +1404,306 @@ export class Life {
   }
 
   /**
-   * An NPC idles. Every 3-9s, while no line is up and no action plays, it does one thing at random: one of its
-   * actions, saying one of that action's lines if it has any, or one of its own lines (up for 5s; none while it has
-   * a quest icon). One that wanders stands 1-3s or, 1 time in 5, walks 0.5-1.5s either way, turning back at
-   * either end of rx0-rx1; an action brings it to a stop.
+   * An NPC idles. One that walks plays the stretches it is sent (see npcPlan); one we control that stays put asks
+   * the server before it acts (npcAsk); any other, every 3-9s while no line is up and no action plays, does one thing
+   * at random: one of its actions, saying one of that action's lines if it has any, or one of its own lines (up for
+   * 5s; none while it has a quest icon). An action plays once, then it stands or walks again.
    */
   npcStep(dt) {
     if (this.chat && (this.chat.t -= dt) <= 0) this.chat = null;
-    if (this.acting && this.anims[this.acting]?.done !== false) this.acting = null;
-    if (this.onNpcAction && !this.walks) this.npcAsk(dt);
+    if (this.acting && this.anims[this.acting]?.done !== false) { this.acting = null; this.setState(this.walkPose || 'stand'); }
+    if (this.walks && (this.onNpcAction || !this.online)) { this.actT -= dt; this.playPath(dt); return; }
+    if (this.walks) { this.playPath(dt); return; }
+    if (this.onNpcAction) this.npcAsk(dt);
     else if ((this.actT -= dt) <= 0 && !this.chat && !this.acting && this.picks.length) {
       this.actT = 3 + Math.random() * 6;
       const p = this.picks[Math.floor(Math.random() * this.picks.length)];
       if (this.anims[p.action]) { this.acting = p.action; this.setState(p.action); }
       if (p.lines.length && !this.questIcon) this.chat = { text: p.lines[Math.floor(Math.random() * p.lines.length)], t: 5 };
     }
-    if (this.walks && this.fh) this.npcWalk(dt);
-    if (!this.acting) this.setState(this.dir ? 'move' : 'stand');
+    if (!this.acting) this.setState('stand');
   }
   /**
-   * An NPC we control (one that stays put): once its 3-9s wait is up, with no line up, no action playing and no answer
-   * waiting, it picks a number below 50, taken modulo its actions (but the special ones) and lines together. An
-   * action (not the shop) goes as 2 + its place, with one of its own lines if it has any; otherwise that line of its
-   * own. It sends NPC_ACTION and does nothing until the server sends it back (npcActed).
+   * The client's pick, once its 3-9s wait is up with no line up and no action playing (the wait starts again): a
+   * number below 50, taken modulo its actions (but the special ones) and lines together. An action (not the shop) goes
+   * as 2 + its place, with one of its own lines if it has any; otherwise that line of its own. Null when not yet.
    */
-  npcAsk(dt) {
-    if ((this.actT -= dt) > 0 || this.chat || this.acting || this.npcWaiting) return;
+  npcPick() {
+    if (this.actT > 0 || this.chat || this.acting) return null;
     this.actT = (3000 + Math.floor(Math.random() * 6000)) / 1000;
-    const L = this.npcLists, n = L.actions.filter((a) => !a.special).length, m = L.lines.length;
-    if (!(n + m)) return;
+    const L = this.npcLists, n = L ? L.actions.filter((a) => !a.special).length : 0, m = L ? L.lines.length : 0;
+    if (!(n + m)) return null;
     const r = npcRoll() % (n + m);
-    let action = -1, chat;
-    if (r < n && !L.actions[r].shop) { action = r + 2; const k = L.actions[r].lines.length; chat = k ? npcRoll() % k : -1; }
-    else chat = r - n;
-    this.npcWaiting = true;
-    this.onNpcAction(this, action, chat);
+    if (r < n && !L.actions[r].shop) { const k = L.actions[r].lines.length; return { action: r + 2, chat: k ? npcRoll() % k : -1 }; }
+    return { action: -1, chat: r - n };
   }
-  /** NPC_ACTION back from the server: play that action (from 2) and say that line, or say that line of its own (-1). */
-  npcActed(action, chat) {
+  /** An NPC we control that stays put: its pick goes out as NPC_ACTION, and nothing more until the server sends it back. */
+  npcAsk(dt) {
+    this.actT -= dt;
+    if (this.npcWaiting) return;
+    const pick = this.npcPick();
+    if (!pick) return;
+    this.npcWaiting = true;
+    this.onNpcAction(this, pick.action, pick.chat);
+  }
+  /**
+   * NPC_ACTION back from the server: play that action (from 2) and say that line, or say that line of its own (-1);
+   * for one that walks, the stretch it carries is queued to be walked.
+   */
+  npcActed(action, chat, start = null, moves = null) {
     this.npcWaiting = false;
     const L = this.npcLists;
-    if (!L) return;
     const say = (lines) => { if (chat >= 0 && chat < lines.length && !this.questIcon) this.chat = { text: lines[chat], t: 5 }; };
-    if (action === -1) { say(L.lines); return; }
-    const a = L.actions[action - 2];
-    if (!a) return;
-    if (this.anims[a.action]) { this.acting = a.action; this.setState(a.action); }
-    say(a.lines);
-  }
-  npcWalk(dt) {
-    const s = this.spawn;
-    if (this.acting) this.vx = approach(this.vx, 0, 400 * dt);
-    else {
-      if ((this.moveT -= dt) <= 0) {
-        const walk = Math.random() < 0.2;
-        this.dir = walk ? (Math.random() < 0.5 ? -1 : 1) : 0;
-        this.moveT = Math.floor((walk ? 500 + Math.random() * 1000 : 1000 + Math.random() * 2000) / 90) * 0.09;
-      }
-      const k = this.swimming() ? PHYS.swimDec : 1;
-      this.vx = this.dir ? accelerate(this.vx, this.dir * PHYS.walkAccel * k, this.speed * k, dt) : approach(this.vx, 0, PHYS.walkBrake * dt);
-      if (this.dir) this.facingRight = this.dir > 0;
+    if (L && action === -1) say(L.lines);
+    else if (L) {
+      const a = L.actions[action - 2];
+      if (a) { if (this.anims[a.action]) { this.acting = a.action; this.setState(a.action); } say(a.lines); }
     }
-    const { x, y, fh } = this;
-    const want = this.x + this.vx * dt, to = Math.max(s.rx0, Math.min(s.rx1, want));
-    if (to !== want) this.vx = 0;
-    if (to !== x && this.footholds.walk(this, to - x) !== 'ok') { this.x = x; this.y = y; this.fh = fh; this.vx = 0; }
-    // held up at an end: turn back (and give up if that way is blocked too)
-    if (this.dir && !this.acting && dt > 0 && this.x === x) { this.dir = this.turned ? 0 : -this.dir; this.turned = true; } else this.turned = false;
+    if (moves && this.walks) this.applyMovement(start, moves);
+  }
+  /**
+   * A walking NPC we control works out its next stretch, as the client does, on a stand-in that carries on from where
+   * its last stretch ended: its pick (an action and line, or none); for an action, a stop and a still stretch as long
+   * as the action's frames (180ms a frame unless it says); then its walk, a 90ms step every third 30ms tick (55 ticks
+   * at most), until a second is planned with some of it on the ground. The stretch goes out with NPC_ACTION and is
+   * walked only when the server sends it back (offline, at once).
+   */
+  npcPlan() {
+    const S = (this.npcSim ??= { x: this.x, y: this.y, fh: this.fh, v: 0, dir: 0, count: 0, acc: 0, stance: this.facingRight ? 4 : 5 });
+    const pick = this.npcPick() || { action: -1, chat: -1 };
+    const start = { x: Math.trunc(S.x), y: Math.trunc(S.y) }, moves = [];
+    let ms = 0;
+    // a point where it is (speeds as it goes along its floor), merged into the one before while its floor, pose and
+    // the signs of its speeds stay the same
+    const record = (dur) => {
+      const f = S.fh, vx = Math.trunc(S.v), vy = Math.trunc(f && f.x2 > f.x1 ? (S.v * (f.y2 - f.y1)) / (f.x2 - f.x1) : 0);
+      const e = { cmd: 0, x: Math.trunc(S.x), y: Math.trunc(S.y), vx, vy, fh: f?.id || 0, stance: S.stance, duration: dur }, l = moves[moves.length - 1];
+      if (l && l.cmd === 0 && l.fh === e.fh && l.stance === e.stance && Math.sign(l.vx) === Math.sign(vx) && Math.sign(l.vy) === Math.sign(vy)) Object.assign(l, { ...e, duration: l.duration + dur });
+      else moves.push(e);
+      ms += dur;
+    };
+    if (pick.action !== -1) {
+      const a = this.npcLists?.actions[pick.action - 2], anim = a && this.anims[a.action];
+      const pause = anim ? anim.frames.reduce((t, f) => t + (Number(f.delay) || 180), 0) : 0;
+      S.v = 0;
+      moves.push({ cmd: 2, rx: 0, ry: 0, stance: S.stance, duration: 0 });
+      for (let t = 0; t < pause; t += 30) record(Math.min(30, pause - t));
+    }
+    const ready = () => moves.length && ms >= 1000 && moves.some((m) => m.cmd === 0 && m.fh);
+    for (let n = 0; n < 55 && !ready(); n++) {
+      if ((S.acc += 30) < 90) continue;
+      S.acc -= 90;
+      this.npcWalkStep(S);
+      record(90);
+    }
+    if (!this.online) { this.npcActed(pick.action, pick.chat); this.queueOwn(moves); return; }
+    this.npcWaiting = true;
+    this.onNpcAction?.(this, pick.action, pick.chat, start, moves);
+  }
+  /**
+   * One 90ms step of a walking NPC's stand-in: once its count runs out it walks 1 time in 5 (0.5-1.5s, either way) or
+   * stands (1-3s); it speeds up and brakes as a character walking does, at its speed; it stays within rx0-rx1 and on
+   * its chain of floors (stopped at either); held up where it was, it turns back.
+   */
+  npcWalkStep(S) {
+    const rnd = (n) => Math.floor(Math.random() * n), dt = 0.09, sp = this.spawn;
+    if (S.count < 1) {
+      if (rnd(5) === 0) { S.count = Math.floor((rnd(1000) + 500) / 90); S.dir = rnd(2) ? -1 : 1; }
+      else { S.dir = 0; S.count = Math.floor((rnd(2000) + 1000) / 90); }
+    }
+    S.count--;
+    S.stance = S.dir ? 2 | (S.dir < 0 ? 1 : 0) : 4 | (S.stance & 1);
+    if (!S.fh) return;
+    const v0 = S.v, x0 = S.x;
+    S.v = groundVelocity(v0, S.dir, S.fh, this.footholds.fs || 1, this.speed, false, dt);
+    const want = S.x + ((v0 + S.v) / 2) * dt, to = Math.max(sp.rx0 ?? -Infinity, Math.min(sp.rx1 ?? Infinity, want));
+    if (to !== want) S.v = 0;
+    let dx = to - S.x;
+    for (let guard = 0; guard < 16 && dx; guard++) {
+      const f = S.fh, nx = S.x + dx;
+      if (nx >= f.x1 && nx <= f.x2) { S.x = nx; S.y = Footholds.yAt(f, nx); break; }
+      const right = dx > 0, nb = this.footholds.get(right ? f.next : f.prev);
+      S.x = right ? f.x2 : f.x1; S.y = right ? f.y2 : f.y1; dx = nx - S.x;
+      if (nb && nb.x1 < nb.x2) { S.fh = nb; continue; }
+      S.v = 0; break;   // the chain ends (or a wall): it stops at its end
+    }
+    if (S.dir && S.x === x0) S.dir = -S.dir;
   }
 
   /**
-   * Its next move, as the client's monster AI makes it (every 30ms; its waits are counted in 90ms units). Left alone
-   * it walks left, walks right or stands, picked evenly, for 0.33-1s at a time; one that jumps jumps instead one
-   * time in five. Chasing, it heads for its target, aiming again every 0.27-0.4s: within 100px it keeps going the
-   * way it was (so it walks past and back) unless it reaches the map's side. One that jumps and stands under the
-   * platform its target is on jumps up to it.
+   * The AI of one that stays put: once its wait is up it turns to face whoever it is going after, then waits
+   * 8-13 steps again.
    */
-  think(dt) {
+  aiStay() {
+    if (this.aiT > 0) { this.aiT--; return; }
     const t = this.aggro;
-    if (t && this.canJump && this.underTarget(t) && Math.random() < 1 - (2 / 3) ** (dt / 0.03)) {
-      this.dir = 0; this.timer = 0; this.jump(); return;
-    }
-    if ((this.timer -= dt) > 0) return;
-    if (t) {
-      this.timer = aiWait(800, 400);
-      if (!this.dir || Math.abs(t.x - this.x) > 99) this.dir = t.x >= this.x ? 1 : -1;
-      else if (this.x <= this.footholds.left) this.dir = 1;
-      else if (this.x >= this.footholds.right) this.dir = -1;
-    } else if (this.canJump && Math.random() < 0.2) {
-      this.jump(); return;
-    } else {
-      this.timer = aiWait(1000, 2000);
-      this.dir = Math.floor(Math.random() * 3) - 1;
-    }
-    this.walkState();
+    if (!t) return;
+    this.aiT = aiSteps(800, 400);
+    this.facingRight = this.x <= t.x;
   }
-  /** Its target stands on another platform above it that reaches over where it is. */
-  underTarget(t) {
-    const tf = t.fh;
-    if (!tf || !this.fh || tf.group === this.fh.group || t.y >= this.y) return false;
-    const g = this.footholds.groups?.get(tf.group);
-    return !!g && this.x >= g.x1 && this.x < g.x2;
+  /**
+   * The AI of one that walks. Left alone, when its wait is up it walks left, walks right or stands (picked evenly)
+   * for 11-33 steps. Going after someone it decides every 8-13 steps: toward them when it was standing or they are
+   * 100px or more away across, otherwise on the way it was going, unless it stands right at one of the map's sides
+   * (then away from it).
+   */
+  aiWalk() {
+    if (this.aiT < 1) {
+      const t = this.aggro;
+      if (!t) { this.aiT = aiSteps(1000, 2000); this.aiDir = rnd(3) - 1; }
+      else { this.aiT = aiSteps(800, 400); this.aiChase(t); }
+      this.setInput(this.aiDir);
+    }
+    this.aiT--;
+  }
+  /** Which way to go after `t`, as both walking AIs decide it. */
+  aiChase(t) {
+    if (!this.aiDir || Math.abs(Math.trunc(this.x - t.x)) > 99) this.aiDir = this.x <= t.x ? 1 : -1;
+    else if (this.x === this.footholds.wallL) this.aiDir = 1;
+    else if (this.x === this.footholds.wallR) this.aiDir = -1;
+  }
+  /**
+   * The AI of one that walks and jumps (on the ground; in the air it only counts its wait down):
+   * - after a jump of its own that didn't lift it, it turns round;
+   * - a wall rising ahead within 40px along its floor makes it jump while its wait isn't up; right against it
+   *   (within 1px of its floor's end) it turns round instead;
+   * - left alone, when its wait is up it jumps one time in five, otherwise walks left, right or stands for 11-33 steps;
+   * - going after someone on another group of footholds above it, while it stands within that group's reach, it
+   *   jumps one time in three each step (its wait gone); otherwise it decides every 8-13 steps as one that walks.
+   */
+  aiJump() {
+    const f = this.fh;
+    if (!f) { this.aiT--; return; }
+    if (this.jumpAsked) {
+      this.jumpAsked = false;
+      if (this.dir && Math.trunc(this.y) === this.jumpY) this.setInput(-this.dir);
+    }
+    const look = this.footholds.ahead(f, this.dir, this.alongFh(), 40);
+    if (look && this.dir && !(look.ux > 0) && look.uy * this.dir < 0) {
+      const nb = this.footholds.get(this.dir < 0 ? f.prev : f.next), at = this.alongFh();
+      if (nb && !(nb.ux > 0) && nb.uy * this.dir < 0 && ((this.dir < 0 && at < 1) || (this.dir > 0 && at > f.len - 1))) this.setInput(-this.dir);
+      else if (this.aiT >= 1) { this.askJump(true); this.aiT--; return; }
+    }
+    const t = this.aggro;
+    if (!t) {
+      if (this.aiT < 1) {
+        if (rnd(5) === 0) this.jumpNow();
+        else { this.aiT = aiSteps(1000, 2000); this.aiDir = rnd(3) - 1; this.setInput(this.aiDir); }
+      }
+      this.aiT--; return;
+    }
+    if (this.aiT > 0) {
+      const tz = t.fh ? t.fh.zMass : t.zMass, r = tz !== undefined && tz !== f.zMass && t.y < this.y ? this.footholds.flyGroups().range.get(tz) : null;
+      if (r && this.x > r[0] && this.x < r[1] && rnd(3) === 0) { this.aiDir = 0; this.aiT = 0; this.askJump(true); this.aiT--; return; }
+      if (this.aiT > 0) { this.aiT--; return; }
+    }
+    this.aiT = aiSteps(800, 400);
+    this.aiChase(t);
+    this.setInput(this.aiDir);
+    this.aiT--;
+  }
+  /** The way it is pushed (-1, 0, 1): it faces that way and walks (its chase pose when chasing), or stands. */
+  setInput(d) {
+    this.dir = d;
+    if (this.fh) this.walkState();
+    else if (d) this.facingRight = d > 0;
   }
   /** Walking (its chase pose when it has one and is chasing) or standing, facing the way it goes. */
   walkState() {
     if (this.dir) this.facingRight = this.dir > 0;
     this.setState(!this.dir ? 'stand' : this.aggro && this.anims.chase ? 'chase' : 'move');
   }
-  /** One that can't move still turns to face whoever it is chasing, every 0.27-0.4s. */
-  faceTarget(dt) {
-    if (!this.aggro || (this.timer -= dt) > 0) return;
-    this.timer = aiWait(800, 400);
-    this.facingRight = this.aggro.x >= this.x;
-  }
-  /** A jump: up at the jump speed a character has (555px/s), keeping its walking speed the way it goes. */
-  jump() {
-    if (!this.fh) return;
-    this.fh = null; this.vy = -PHYS.jump * (this.swimming() ? 0.7 : 1); this.vx = this.dir * this.walkSpeed;
-    this.setState(this.anims.jump ? 'jump' : 'move');
-  }
-  /** It walks along its floor; a platform's edge or a wall stops it (standing) until its next move. */
-  walkStep(dt) {
-    const fh = this.fh, x = this.x, y = this.y;
-    if (this.footholds.walk(this, this.dir * this.walkSpeed * (this.swimming() ? PHYS.swimDec : 1) * dt) !== 'ok') {
-      this.fh = fh; this.x = x; this.y = y;
-      this.setState('stand');
+  /** How far along its floor it stands. */
+  alongFh() { const f = this.fh; return f ? Math.hypot(this.x - f.x1, this.y - f.y1) : 0; }
+  /** A jump for its next step (from its AI: `ai`, remembering the height it asked at). */
+  askJump(ai) { this.jumpKey = true; this.jumpAsked = ai; if (ai) this.jumpY = Math.trunc(this.y); }
+  /**
+   * A jump from where it stands: lifted 1px off its floor, up at the jump speed (0.7 of it in water). Pushed one
+   * way, it goes at least 0.8 of its walking speed that way (its walking speed up or down a slope going with it more
+   * or less, by the slope's steepness), and no faster than that speed.
+   */
+  jumpNow() {
+    const f = this.fh;
+    if (!f) return;
+    this.fh = null; this.y = Math.floor(this.y - 1);
+    this.vy = -PHYS.jump * (this.swimming() ? 0.7 : 1);
+    if (this.dir) {
+      const max = this.walkSpeed * (1 + f.uy * f.uy * (this.dir * f.uy >= 0 ? 1 : -1)), v = this.vx || 0;
+      let vx = this.dir * v < max * 0.8 ? v + this.dir * max * 0.8 : v;
+      if (this.dir * vx > max) vx = this.dir * max;
+      this.vx = vx;
     }
+    this.setState(this.anims.jump ? 'jump' : 'move');
+    this.onJump?.(this);
   }
   /**
-   * A flyer flies to one spot after another. Left alone it picks a platform of the map at random and spots over its
-   * floors (up to 60px above one), moving on to another platform after (its width + 40-240) / 8 spots. Chasing, its
-   * spots are within 120px left or right and 40px up or down of its target, picked again when it gets there or the
-   * target moves 150px away from the spot; after 60-119 of those it gives up the chase.
+   * Where one that jumps may be across (lo, hi): from the left of the group of footholds it was placed on, or of
+   * group `z` if further, to the right of the further of the two - each group's footholds, walls too - and 20px in
+   * from each side when that leaves more than 40px.
    */
-  flyStep(dt) {
-    const t = this.aggro, d = this.dest;
-    if (!d || (t && (Math.abs(t.x - d.x) > 150 || Math.abs(t.y - d.y) > 150))) this.dest = this.flySpot(t);
-    const to = this.dest;
-    this.setState('fly');
-    if (!to) return;
-    const dx = to.x - this.x, dy = to.y - this.y, v = this.flySpeed * dt;
-    if (Math.abs(dx) > 9) this.facingRight = dx > 0;
-    this.x += Math.sign(dx) * Math.min(Math.abs(dx), v);
-    this.y += Math.sign(dy) * Math.min(Math.abs(dy), v);
-    if (Math.abs(to.x - this.x) <= 11 && Math.abs(to.y - this.y) <= 11) this.dest = null;
+  jumpRange(z) {
+    const R = this.footholds.flyGroups().range, home = R.get(this.homeZ), cur = z === undefined ? null : R.get(z);
+    let lo = Math.min(cur ? cur[0] : Infinity, home ? home[0] : Infinity), hi = Math.max(cur ? cur[1] : -Infinity, home ? home[1] : -Infinity);
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null;
+    if (hi - lo > 40) { lo += 20; hi -= 20; }
+    return [lo, hi];
   }
-  flySpot(t) {
-    const rnd = (n) => Math.floor(Math.random() * n);
-    if (t) {
-      if (!this.chaseSpots) this.chaseSpots = 60 + rnd(60);
-      if (--this.chaseSpots < 1) { this.aggro = this.chased = null; this.chaseSpots = 0; }
-      return { x: t.x + rnd(240) - 120, y: t.y + rnd(80) - 40 };
+  /** In the air, held inside its range: put back at the side it passed, turning that way if its AI means to go. */
+  holdInRange(x, lim) {
+    if (!lim) return x;
+    if (x < lim[0]) { if (this.aiDir) this.setInput(1); return lim[0]; }
+    if (x > lim[1]) { if (this.aiDir) this.setInput(-1); return lim[1]; }
+    return x;
+  }
+  /** Stopped at an edge while chasing: it gives the chase up within 3-6s. */
+  shortenChase() { if (this.aggro) this.chaseT = Math.min(this.chaseT, (3000 + rnd(3000)) / 1000); }
+  /**
+   * 90ms of walking along its floor, `type` 1 walking, 2 walking and jumping, a floor at a time. At a floor's end it
+   * goes on onto the next floor of its chain; at a rising wall it stops against it; off a ledge or the chain's end it
+   * falls, still going its way. But on each floor it walks onto, first:
+   * - one that walks turns round 20px before the end of its floor when what comes next isn't a floor (put back at
+   *   20px from that end);
+   * - one that jumps keeps within its range (see jumpRange): past it, it is put back on the range's side and turns
+   *   round. Inside it, at its floor's end: a ledge dropping away it walks off when no one it is going after is on
+   *   another group and its range reaches beyond; otherwise (a rising wall, nothing further, a ledge it doesn't take)
+   *   it stays where it was and jumps next step - unless it is going after someone below it, when half the time it
+   *   walks on (and off).
+   * Turning round only turns it when its AI means to go somewhere.
+   */
+  walkOn(dt, type) {
+    let dx = this.dir * this.walkSpeed * (this.swimming() ? PHYS.swimDec : 1) * dt;
+    const turn = () => { this.vx = 0; if (this.aiDir) this.setInput(dx <= 0 ? 1 : -1); this.shortenChase(); };
+    const was = { x: this.x, y: this.y, fh: this.fh, zMass: this.zMass, vx: this.vx };
+    this.vx = dx / dt;
+    for (let guard = 0; guard < 16; guard++) {
+      const f = this.fh, nx = this.x + dx, right = dx > 0;
+      const nb = this.footholds.get(right ? f.next : f.prev), onward = !!nb && nb.ux > 0;
+      if (type === 1) {
+        const at = (nx - f.x1) / f.ux;
+        if (!onward && ((right && f.len - at < 20) || (!right && at < 20))) {
+          const a = Math.max(0, Math.min(f.len, right ? f.len - 20 : 20));
+          this.x = f.x1 + f.ux * a; this.y = f.y1 + f.uy * a; turn(); return;
+        }
+      } else if (type === 2) {
+        const lim = this.jumpRange(f.zMass);
+        if (lim && (nx < lim[0] || nx > lim[1])) {
+          if (this.footholds.walk(this, (nx <= lim[1] ? lim[0] : lim[1]) - this.x) === 'edge') this.vy = 0;
+          turn(); return;
+        }
+        if (lim && (nx < f.x1 || nx > f.x2)) {
+          const t = this.aggro, tz = t && (t.fh ? t.fh.zMass : t.zMass);
+          const ledge = !!nb && !onward && nb.uy * dx > 0 && (!t || tz === f.zMass) && ((!right && lim[0] < f.x1) || (right && f.x2 < lim[1]));
+          if (!onward && !ledge && (!t || t.y <= this.y || rnd(2) === 0)) { Object.assign(this, was); this.askJump(false); return; }
+        }
+      }
+      if (nx >= f.x1 && nx <= f.x2) { this.x = nx; this.y = Footholds.yAt(f, nx); this.zMass = f.zMass; return; }
+      // to this floor's end, then on
+      const endX = right ? f.x2 : f.x1;
+      this.x = endX; this.y = right ? f.y2 : f.y1; dx = nx - endX;
+      if (onward) { this.fh = nb; continue; }
+      if (nb && nb.x1 === nb.x2 && (right ? nb.y2 < nb.y1 : nb.y1 < nb.y2)) { this.vx = 0; return; }   // a rising wall
+      this.fh = null; this.x += dx; this.vy = 0; return;   // off the ledge
     }
-    const groups = [...(this.footholds.groups?.values() || [])];
-    if (!groups.length) return null;
-    if (!this.flyGroup || this.flySpots < 1) {
-      this.flyGroup = groups[rnd(groups.length)];
-      this.flySpots = (this.flyGroup.x2 - this.flyGroup.x1 + 40 + rnd(200)) >> 3;
-    }
-    this.flySpots--;
-    const f = this.flyGroup.floors[rnd(this.flyGroup.floors.length)], x = f.x1 + rnd(Math.max(1, f.x2 - f.x1));
-    return { x, y: Footholds.yAt(f, x) - rnd(60) };
   }
 
   draw(ctx, cam, assets) {

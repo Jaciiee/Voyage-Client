@@ -3,7 +3,8 @@ import { ControlTabs } from './keyconfig-tabs.js';
 import { cloneControls, saveControls } from '../controls.js';
 import { EXP, jobName, itemIcon, itemName, itemInfo, invType, isScroll, itemKeyType } from '../data.js';
 import { sfx } from '../audio.js';
-import { WzButton, TextField, uiText, wrapText } from './wzui.js';
+import { WzButton, TextField, uiText, wrapText, nearButton } from './wzui.js';
+import { settings } from '../settings.js';
 import { richText, drawRich, QUEST_STATES } from './richtext.js';
 import { isPartyQuest, questSort, TITLE_AREA } from '../quests.js';
 import { UI_W, UI_H } from '../view.js';
@@ -59,6 +60,10 @@ export class WindowManager {
     if (!w) return;
     const into = (v, size, view) => Math.round(size <= view ? Math.max(0, Math.min(view - size, v)) : Math.max(0, Math.min(view - 40, v)));
     w.x = into(w.x, w.w, UI_W); w.y = into(w.y, w.h, UI_H);
+    // MOBILE UI: a window opening under its top panels (your gauges, the buttons) goes down below them, as far as it fits
+    for (const r of this.game?.mobileHud?.reserved?.() || []) {
+      if (w.x < r.x + r.w && w.x + w.w > r.x && w.y < r.y + r.h && w.y + w.h > r.y) w.y = Math.max(w.y, Math.min(Math.ceil(r.y + r.h + 2), Math.max(0, UI_H - w.h)));
+    }
   }
   close(w) {
     // a window may ask first (Key Setting's "Save changes?"); it closes once that is answered
@@ -91,21 +96,52 @@ export class WindowManager {
     this.close(top);
     return true;
   }
+  /**
+   * Tab: the newest window still open of those the client keeps a list of (Equipment, Item, Stat, Skill, Quest,
+   * Medal, the user list, Character Info, Key Setting, Family and its tree, Maker, Party Search) moves on to its next
+   * tab, from its last back to its first, when it has tabs (Item, Skill, Quest, Medal, the user list); for the others
+   * nothing happens. No sound. False when nothing moved.
+   */
+  tabNext() {
+    const listed = new Set(['inventory', 'equip', 'stat', 'skill', 'quest', 'keyconfig', 'medal', 'userlist', 'family', 'familytree', 'partysearch'].map((k) => this.wins[k]));
+    let last = null;
+    for (const w of this.order) if ((w.tabListed || listed.has(w)) && (!last || (w.openedSeq || 0) > (last.openedSeq || 0))) last = w;
+    if (!last?.nextTab) return false;
+    last.nextTab();
+    return true;
+  }
+  /**
+   * The window that has the keyboard (the SkillUp notice, as it opens): Enter goes to it, Esc and Tab do nothing, and
+   * the game's own keys wait (the arrows still walk) until it closes or a click lands anywhere but on it.
+   */
+  get keyHolder() { return this.holder && this.order.includes(this.holder) && !this.modal ? this.holder : null; }
+  set keyHolder(w) { this.holder = w; }
   /** A transient window (dialog, shop) on top of everything. */
   show(w, sound = 'UI/DlgNotice') { this.fit(w); this.order.push(w); w.openedSeq = this.openSeq = (this.openSeq || 0) + 1; if (sound) sfx.play(sound); return w; }
   get modal() { for (let i = this.order.length - 1; i >= 0; i--) if (this.order[i].modal) return this.order[i]; return null; }
   keydown(e) {
     // Escape puts back an item held by a click
     if (e.key === 'Escape' && this.carry?.sticky) { e.preventDefault(); e.stopImmediatePropagation(); this.carry = null; return; }
+    const holder = this.keyHolder;
+    if (holder) {
+      if (e.key === 'Enter' || e.key === 'Escape' || e.key === 'Tab') { e.preventDefault(); e.stopImmediatePropagation(); if (e.key === 'Enter') holder.key?.(e); }
+      return;
+    }
     const top = this.modal || (this.order[this.order.length - 1]?.key && e.key === 'Escape' ? this.order[this.order.length - 1] : null);
     if (!top) return;
+    if (this.skin?.(top) && e.target?.closest?.('.mhud')) return;   // MOBILE UI's own boxes take their keys
     const typing = e.target instanceof HTMLInputElement;
     if (e.key === 'Enter' || e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); top.key?.(e); return; }
     if (!typing && top === this.modal && top.keys?.(e)) { e.preventDefault(); e.stopImmediatePropagation(); return; }   // a dialog's own keys (arrows, Tab)
     if (!typing && this.modal) e.stopImmediatePropagation();   // no walking or attacking under a dialog
   }
   raise(w) { const i = this.order.indexOf(w); if (i >= 0 && i !== this.order.length - 1) { this.order.splice(i, 1); this.order.push(w); } }
-  top(x, y) { for (let i = this.order.length - 1; i >= 0; i--) if (this.order[i].contains(x, y)) return this.order[i]; return null; }
+  top(x, y) { for (let i = this.order.length - 1; i >= 0; i--) if (!this.skin?.(this.order[i]) && this.order[i].contains(x, y)) return this.order[i]; return null; }
+  /**
+   * MOBILE UI shows some windows as its own HTML (ui/mobileskins.js sets skin(w) to say which): they stay open and do
+   * all their work, but aren't drawn here nor take the pointer; a dialog among them still holds the rest back.
+   */
+  skin = null;
 
   // ---------------------------------------------------------------- shared helpers
   /** Item icon node, loaded on first use (null until ready). */
@@ -191,6 +227,7 @@ export class WindowManager {
   // ---------------------------------------------------------------- input (canvas coordinates)
   pointer(type, x, y, dy = 0) {
     this.mouse = { x, y };
+    if (type === 'down' && this.holder && this.top(x, y) !== this.holder) this.holder = null;   // a click elsewhere takes the keyboard back
     if (this.drag) {
       const d = this.drag;
       d.win.x = Math.round(Math.max(-d.win.w + 40, Math.min(UI_W - 40, x - d.dx)));
@@ -204,7 +241,8 @@ export class WindowManager {
     for (const o of this.order) for (const b of o.buttons) b.hover = false;
     let over = null;
     if (w) {
-      over = w.buttons.find((b) => b.visible && b.hit(x - w.x, y - w.y)) || null;
+      // (MOBILE UI: a tap just off a button's art still takes the nearest one)
+      over = w.buttons.find((b) => b.visible && b.hit(x - w.x, y - w.y)) || (settings.mobileUi ? nearButton(w.buttons, x - w.x, y - w.y) : null) || null;
       if (over) over.hover = true;
       if (over && over !== this.hovered && over.enabled && !over.down) sfx.play('UI/BtMouseOver');   // not a disabled or held one
     }
@@ -274,6 +312,7 @@ export class WindowManager {
 
   draw(ctx) {
     for (const w of this.order) {
+      if (this.skin?.(w)) continue;   // shown by MOBILE UI instead
       try { w.draw(ctx); } catch (e) {
         // a window that throws mid-draw would leave saves / clips open and blank everything after it:
         // report it once, put the canvas back and go on with the rest
@@ -456,13 +495,16 @@ class InventoryWin extends Win {
     this.g.csPreselect = SLOT_ITEM_SN[this.tab] || 0;
     this.g.enterCashShop();
   }
-  /** The coin button: drop 10 ~ 50,000 mesos on the ground (the game server's MesoDropHandler range). */
+  /** The coin button: drop 10 ~ 50,000 mesos (at most what you have); one request at a time, 200ms apart. */
   async dropMesos() {
-    if (this.g.dead) { this.g.notice("You can't do it once you're dead."); return; }
+    if (!this.g.handsFree(false)) return;
     const max = Math.min(50000, this.g.meso || 0);
-    if (max < 10) { this.g.notice('You need at least 10 mesos to drop.'); return; }
-    const v = await this.mgr.askNumber(`How many mesos will you drop?\n(10 ~ ${max.toLocaleString('en-US')})`, 10, 10, max);
-    if (v) this.g.net?.dropMeso(v);
+    const v = await this.mgr.askNumber('How many will you drop? (A portion of the amount may be lost if picked up by another user.)', 10, 10, max);
+    if (!(v >= 10) || !this.g.canExclusive(200)) return;
+    // a map that forbids dropping refuses mesos too, as they go (the server would take them and leave nothing)
+    if ((this.g.map?.info?.fieldLimit || 0) & 0x400000) { this.g.notice('You cannot drop the item here.'); return; }
+    this.g.net?.dropMeso(v);
+    this.g.lockExclusive();
   }
   frames() {
     const W = this.W;
@@ -471,6 +513,8 @@ class InventoryWin extends Win {
   wantsArg(tab) { return tab !== undefined && tab !== this.tab; }
   setArg(tab) { if (tab !== undefined && tab !== this.tab) this.setTab(tab); }
   setTab(tab) { this.tab = tab; this.first = 0; this.showSortButton(); }
+  /** Tab: Equip, Use, Set-up, Etc, Cash, then Equip again. */
+  nextTab() { this.setTab((this.tab % 5) + 1); }
   get limit() { return this.g.inventory?.limits?.[this.tab] || 24; }
   get rows() { return Math.ceil(this.limit / 4); }
   /** A slot's 32x32 cell (top-left), or null when it isn't on show. */
@@ -545,34 +589,18 @@ class InventoryWin extends Win {
   }
   drop(lx, ly, c) {
     if (c.kind !== 'item') return;
-    if (this.g.dead) { this.g.notice("You can't do it once you're dead."); return; }
     const to = this.slotAt(lx, ly) <= this.limit ? this.slotAt(lx, ly) : 0;
-    if (c.tab === this.tab && to && to !== c.slot) this.g.net?.moveItem(this.tab, c.slot, to, this.g.inventory[this.tab][c.slot]?.quantity || 1);
-    else if (c.tab === 'equip' && this.tab === 1) this.g.unequip(c.slot);
-  }
-  /** Dragged onto the field: drop it (ITEM_MOVE to slot 0), asking how many of a stack. */
-  async dropOutside(c) {
-    if (c.kind !== 'item' || typeof c.tab !== 'number') return;
-    const it = this.g.inventory?.[c.tab]?.[c.slot];
-    if (!it || this.g.dead) return;
-    if (it.flag & 1) { this.mgr.notice('Sealed items cannot be\r\nsold, traded, or dropped.'); return; }   // sealed by an Item Guard
-    // wedding rings, ring boxes, the reservation receipts, the Parent's Blessing, the Officiator's Permission and the
-    // Admin's Candle stay; an engagement ring asks, then breaks it off
-    if (Math.floor(it.id / 10000) === 224 || NO_DROP_WEDDING.has(it.id)) return;
-    if (it.id >= 4031357 && it.id <= 4031364) {
-      const married = this.g.rings?.marriage?.status === 3;
-      if (await this.mgr.confirm(married ? 'You will not be able to receive the wedding ring.\r\nIs that okay?'
-        : 'Dropping this item will break your engagement.\r\nDo you still wish to drop this item?')) this.g.net?.breakEngagement(it.id);
+    // something you wear: into the cell it was dropped on; over another tab, the Equip tab opens with it still in hand
+    if (c.tab === 'equip') {
+      if (this.tab !== 1) { this.setTab(1); this.mgr.carry = c; return; }
+      this.g.unequip(c.slot, to || 0);
       return;
     }
-    let qty = 1;
-    // throwing stars and bullets always go as a whole stack (the server drops them that way)
-    if (c.tab !== 1 && it.quantity > 1 && ![207, 233].includes(Math.floor(it.id / 10000))) {
-      qty = await this.mgr.askNumber(`How many will you drop?\n(1 ~ ${it.quantity})`, it.quantity, 1, it.quantity);
-      if (!qty) return;
-    }
-    if (this.g.inventory?.[c.tab]?.[c.slot] === it) this.g.net?.moveItem(c.tab, c.slot, 0, qty);
+    if (this.g.dead) { this.g.notice("You can't do it once you're dead."); return; }
+    if (c.tab === this.tab && to && to !== c.slot) this.g.net?.moveItem(this.tab, c.slot, to, this.g.inventory[this.tab][c.slot]?.quantity || 1);
   }
+  /** Dragged onto the field: dropped, after the client's checks and questions (see Game.dropItem). */
+  dropOutside(c) { if (c.kind === 'item' && typeof c.tab === 'number') this.g.dropItem(c.tab, c.slot); }
   wheel(dy) { if (!this.full) this.first = Math.max(0, Math.min(this.rows - 6, this.first + Math.sign(dy))); }
   tooltip(lx, ly) {
     const slot = this.slotAt(lx, ly), it = slot && this.g.inventory?.[this.tab]?.[slot];
@@ -646,7 +674,15 @@ class EquipWin extends Win {
       cells.push(...this.petCells().map(([s, c, r]) => [s, PET_X + 13 + c * 33, 12 + r * 33]));
     }
     for (const [cell, x, y] of cells) {
-      if (cell === 'hp' || cell === 'mp') { const id = this.g.petPotions?.[cell]; if (id) m.drawIcon(ctx, m.icon(id), x, y); continue; }
+      if (cell === 'hp' || cell === 'mp') {
+        // without the lead pet wearing its pouch the cell is red, and a potion set in it is let go (with no pet here
+        // yet, as just after a map change, it is only red: the pets come back a moment later)
+        const pouch = this.g.petPouch(cell);
+        if (pouch !== false) { const id = this.g.petPotions?.[cell]; if (id) m.drawIcon(ctx, m.icon(id), x, y); continue; }   // (null: still being read)
+        ctx.fillStyle = 'rgba(255,0,0,0.25)'; ctx.fillRect(x, y, 32, 32);
+        if (pouch === false && this.g.myPets()[0]) this.g.clearPetPotion(cell);
+        continue;
+      }
       const slot = this.shown(Number(cell)), it = eq[slot];
       if (!it || (m.carry?.tab === 'equip' && m.carry.slot === slot)) continue;
       m.drawIcon(ctx, m.icon(it.id), x, y, it.id);
@@ -677,7 +713,19 @@ class EquipWin extends Win {
     const slot = this.slotAt(lx, ly), it = typeof slot === 'number' && slot && this.g.inventory?.equipped?.[slot];
     if (it) this.mgr.startCarry({ kind: 'item', tab: 'equip', slot, id: it.id }, this.mgr.icon(it.id));
   }
-  dblclick(lx, ly) { const slot = this.slotAt(lx, ly); if (typeof slot === 'number' && slot && this.g.inventory?.equipped?.[slot]) this.g.unequip(slot); }
+  /**
+   * Double-click: taken off into the first free equip slot (not when dead; the 1902040-1902042 mounts never), with
+   * the put-down sound.
+   */
+  dblclick(lx, ly) {
+    const slot = this.slotAt(lx, ly), it = typeof slot === 'number' && slot && this.g.inventory?.equipped?.[slot];
+    if (!it || !this.g.handsFree(false)) return;
+    if (slot === -18 && it.id >= 1902040 && it.id <= 1902042) return;
+    sfx.play('UI/DragEnd');
+    this.g.unequip(slot);
+  }
+  /** Something you wear dragged onto the field: dropped as the inventory's are (see Game.dropItem). */
+  dropOutside(c) { if (c.kind === 'item' && c.tab === 'equip' && typeof c.slot === 'number') this.g.dropItem(1, c.slot); }
   drop(lx, ly, c) {
     if (c.kind !== 'item') return;
     const slot = this.slotAt(lx, ly);
@@ -1169,8 +1217,10 @@ class SkillWin extends Win {
    * A + click: one request at a time; past the first job, the SP already in that job step's skills must be
    * under 3 x level - 89 (2nd), 3 x level - 209 (3rd) or 3 x (level - 119) (4th).
    */
-  raise(i) {
-    const g = this.g, sb = g.skills, id = this.list[this.first + i];
+  raise(i) { this.raiseId(this.list[this.first + i]); }
+  /** The same for a skill by its id (MOBILE UI's skill sheet). */
+  raiseId(id) {
+    const g = this.g, sb = g.skills;
     if (!id || !this.canRaise(id)) return;
     const book = Math.floor(id / 10000), step = book % 10, L = g.stats.level;
     if (book % 100 !== 0 && book !== 2001 && step <= 2) {
@@ -1241,6 +1291,12 @@ class SkillWin extends Win {
     ctx.restore();
     this.scrollbar(ctx, ...SKILL_BAR, this.first, list.length, 4, m.B.VScr4);
     this.text(ctx, this.sp, 110, 265 + SKILL_TEXT_DY, { align: 'right', size: 12 });
+  }
+  /** Tab: the next of your skill books, after the last the first. */
+  nextTab() {
+    const b = this.books || [];
+    if (!b.length) return;
+    this.book = b[(b.indexOf(this.book) + 1) % b.length]; this.first = 0;
   }
   down(lx, ly) {
     if (this.macroOpen && lx >= this.skillW) { this.macroDown(lx, ly); return; }
@@ -1675,15 +1731,20 @@ class QuestWin extends Win {
     if (this.dAlive && lx >= this.w && r && dl >= r.x && dl < r.x + r.w && ly >= r.y && ly < r.y + r.h) return lineTip(`Chain Quest ( ${r.done} / ${r.count} )`, 6, 2);
     return null;
   }
+  /** Another tab (Available, In Progress, Completed): its first quest picked (In Progress: the last one you looked at). */
+  setTab(t) {
+    if (t === this.tab) return;
+    this.tab = t; this.first = 0; this.sel = null;
+    const first = this.rows().find((r) => r.id && (t !== 0 || !this.tooLow(r.id)));
+    const keep = t === 1 && this.lastProgress && this.rows().some((r) => r.id === this.lastProgress) ? this.lastProgress : first?.id;
+    if (keep) { this.select(keep); this.scrollTo(keep); } else this.showDetail(false);
+  }
+  /** Tab: Available, In Progress, Completed, then Available again. */
+  nextTab() { this.setTab((this.tab + 1) % 3); }
   down(lx, ly) {
     const t = tabAt(this.tabRects, lx, ly);
     if (t >= 0) {
-      if (t !== this.tab) {
-        this.tab = t; this.first = 0; this.sel = null; sfx.play('UI/Tab');
-        const first = this.rows().find((r) => r.id && (t !== 0 || !this.tooLow(r.id)));
-        const keep = t === 1 && this.lastProgress && this.rows().some((r) => r.id === this.lastProgress) ? this.lastProgress : first?.id;
-        if (keep) { this.select(keep); this.scrollTo(keep); } else this.showDetail(false);
-      }
+      if (t !== this.tab) { this.setTab(t); sfx.play('UI/Tab'); }
       return;
     }
     if (lx >= this.w) {
@@ -1969,7 +2030,7 @@ const KEYCAPS = {
 const KEY_TWIN = { 54: 42, 89: 29, 90: 56 };
 const keyOf = (sc) => KEY_TWIN[sc] ?? sc;
 const PALETTE = { x: 9, y: 267, step: 34, cols: 18 };
-const FUNCTIONS = [...Array.from({ length: 28 }, (_, i) => [4, i]), ...[50, 51, 52, 53, 54].map((a) => [5, a]), ...[100, 101, 102, 103, 104, 105, 106].map((a) => [6, a])];
+export const FUNCTIONS = [...Array.from({ length: 28 }, (_, i) => [4, i]), ...[50, 51, 52, 53, 54].map((a) => [5, a]), ...[100, 101, 102, 103, 104, 105, 106].map((a) => [6, a])];
 const MACRO_TIP = 'Register the frequently-used skills for a quick access with a single button.';
 
 /**

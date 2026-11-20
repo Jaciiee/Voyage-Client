@@ -121,12 +121,33 @@ const INDEX = path.join(__dirname, 'public', 'index.html');
 // asked at all, is then on record (it showed nothing while Safari kept running a script it had kept).
 const asked = (req) => console.log(`${new Date().toISOString()} ${req.ip} asked for ${req.originalUrl}${req.headers['if-none-match'] || req.headers['if-modified-since'] ? ' (has a copy)' : ''}, build ${BUILD_ID}`);
 app.get('/Voyage.js', (req, res, next) => { asked(req); next(); });
+// The same for the installed app's own files (its manifest, service worker and icons), with the host they were asked
+// for and what was answered: whether a phone's Add to Home Screen got its icon, through a proxy or not, is on record.
+app.get(['/manifest.webmanifest', '/service-worker.js', '/icons/*', '/apple-touch-icon*.png'], (req, res, next) => {
+  res.on('finish', () => console.log(`${new Date().toISOString()} ${req.ip} asked for ${req.originalUrl} on ${req.headers.host || '?'}: ${res.statusCode}, build ${BUILD_ID}`));
+  next();
+});
+// An iPhone also looks for its home-screen icon at the top of the site: the app's own is there too.
+const TOUCH_ICON = path.join(__dirname, 'public', 'icons', 'apple-touch-icon.png');
+app.get(['/apple-touch-icon.png', '/apple-touch-icon-precomposed.png'], (req, res) => res.sendFile(TOUCH_ICON));
+// The manifest lists its icons by the build's id, as the page names the manifest: a phone keeps what it once got for
+// an address (an iPhone even keeps having got no icon), so a new build's addresses are fetched afresh.
+const MANIFEST = path.join(__dirname, 'public', 'manifest.webmanifest');
+app.get('/manifest.webmanifest', (req, res) => {
+  let m;
+  try { m = JSON.parse(fs.readFileSync(MANIFEST, 'utf8')); } catch { res.status(404).end(); return; }
+  const v = encodeURIComponent(BUILD_ID);
+  for (const icon of m.icons || []) if (v && icon.src && !icon.src.includes('?')) icon.src += `?v=${v}`;
+  res.set('Cache-Control', req.query.v ? 'public, max-age=31536000, immutable' : 'no-cache').type('application/manifest+json').send(JSON.stringify(m, null, 2));
+});
 app.get(['/', '/index.html'], (req, res) => {
   asked(req);
   let html;
   try { html = fs.readFileSync(INDEX, 'utf8'); } catch { res.status(404).end(); return; }
   const v = encodeURIComponent(BUILD_ID);
-  if (v) html = html.replace('src="/Voyage.js"', `src="/Voyage.js?v=${v}"`).replace('href="/style.css"', `href="/style.css?v=${v}"`);
+  // (the home-screen icon too: an iPhone keeps the icon it once got for an address, or that it got none)
+  if (v) html = html.replace('src="/Voyage.js"', `src="/Voyage.js?v=${v}"`).replace('href="/style.css"', `href="/style.css?v=${v}"`)
+    .replace('href="/icons/apple-touch-icon.png"', `href="/icons/apple-touch-icon.png?v=${v}"`).replace('href="/manifest.webmanifest"', `href="/manifest.webmanifest?v=${v}"`);
   res.set('Cache-Control', 'no-store').type('html').send(html);
 });
 // (asked for by build id, a file never changes: the browser may keep it)
