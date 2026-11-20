@@ -3494,7 +3494,7 @@ export class Game {
       }),
       showChair: later((id, itemId) => { const rp = this.others.get(id); if (rp) rp.chair = itemId; if (itemId) this.chairArt(itemId); }),
       openPortShop: () => this.widgets?.openPortShop(),
-      cancelChair: later((seat) => { if (seat < 0 && this.player.seat) this.standUp(false); }),
+      cancelChair: later((seat) => this.chairAnswer(seat)),
       removePlayer: later((id) => { this.spawning?.delete(id); this.vfx?.untomb(this.others.get(id)); this.others.delete(id); this.dragons.delete(id); for (const [k, p] of this.pets) if (p.owner === id) this.pets.delete(k); }),
       spawnDragon: later((d) => this.dragons.set(d.owner, new Dragon(d))),
       moveDragon: later((owner, start, moves) => this.dragons.get(owner)?.move(start, moves)),
@@ -7645,12 +7645,15 @@ export class Game {
         if (mx) { dmg.push(...mx.damage(m)); crits.push(...dmg.map(() => false)); break; }
         if (phys) { const h = this.physicalHit(m, wcat % 100, skillId, cbLd || ld, kind === 'ranged', pose, ammo, crit, opts.charge, i); dmg.push(h.d); crits.push(h.c); continue; }
         if (fixedPhys) { dmg.push(this.fixedMiss(m) ? 0 : ld.fixdamage); crits.push(false); continue; }
-        if (kind === 'magic' && !ld?.fixdamage && guarded(m)) { dmg.push(0); crits.push(false); continue; }
-        if (kind === 'magic' && !ld?.fixdamage && immuneTo(m, MAGIC_IMMUNE)) { dmg.push(1); crits.push(false); continue; }
-        if (kind === 'magic' && !ld?.fixdamage && m.status?.second & HARD_SKIN) { dmg.push(0); crits.push(false); continue; }
+        // a spell: its own formula (with universal crit); the monster's fixedDamage then stands in for any damage it does
+        if (kind === 'magic' && this.net) {
+          const h = this.magicHit(m, skillId, ld, opts.charge || 0, targets.length + (opts.healMembers || 0), crit);
+          const fixed = Number(m.src?.info?.fixedDamage) || 0;
+          dmg.push(h.d > 0 && fixed > 0 ? fixed : h.d); crits.push(h.c);
+          continue;
+        }
         const c = skillId === SNIPE || (!!crit && crit.dmg > 100 && Math.random() * 100 < Math.min(100, crit.rate));
         let d = roll();
-        if (kind === 'magic' && !ld?.fixdamage && takenPct(m)) d = Math.trunc((d * (takenPct(m) + 100)) / 100);
         dmg.push(c && skillId !== SNIPE ? Math.min(199999, Math.max(1, Math.round((d * crit.dmg) / 100))) : d); crits.push(c);
       }
       const scale = skillId === ARROW_BOMB ? (ld?.x || 100) / 100 : PIERCE_SCALE[skillId] ? PIERCE_SCALE[skillId] ** place : 1;
@@ -8993,9 +8996,9 @@ export class Game {
   drawChairLayer(ctx, layer, ch, sx, sy, cby, facingRight) {
     const anim = layer?.anim;
     if (!anim?.frames.length) return;
-    const total = anim.frames.reduce((t, f) => t + (f.delay || 100), 0);
+    const total = anim.frames.reduce((t, f) => t + (f.delay || 120), 0);
     let t = performance.now() % total, n = anim.frames[0];
-    for (const f of anim.frames) { if (t < (f.delay || 100)) { n = f; break; } t -= f.delay || 100; }
+    for (const f of anim.frames) { if (t < (f.delay || 120)) { n = f; break; } t -= f.delay || 120; }
     const img = this.assets.image(n);
     if (!img) return;
     const ox = n.origin?.[0] || 0, oy = n.origin?.[1] ?? 0;
@@ -9527,7 +9530,7 @@ export class Game {
    *    x% more; the weapon's elemental magic % (incRMA*, else elemDefault); the monster's damage-taken buff;
    *  - held to 1-199999.
    */
-  magicHit(m, skillId, ld, charge = 0, reached = 1) {
+  magicHit(m, skillId, ld, charge = 0, reached = 1, crit = null) {
     const info = m.src?.info || {}, now = Date.now(), job = this.stats?.job || 0, sb = this.skills;
     const rand = (a, b) => { const lo = Math.min(a, b), hi = Math.max(a, b); return lo + Math.random() * (hi - lo); };
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v)), num = (v) => Number(v) || 0;
@@ -9555,11 +9558,25 @@ export class Game {
     else d = vs(d, digit(elem));
     const mdd = clamp(info.MDDamage || 0, 0, 1999);
     d -= rand(mdd * 0.5, mdd * 0.6);
-    const se = (this.buffs || []).find((b) => b.sharpEyes && b.until > now)?.sharpEyes;
-    let rate = clamp(se?.rate || 0, 0, 100), cdmg = se?.dmg || 0;
-    if ((Math.floor(job / 100) === 22 || job === 2001) && sb.level(CRITICAL_MAGIC)) { const cm = sb.levelData(CRITICAL_MAGIC); rate += num(cm?.prop); cdmg += num(cm?.damage); }
-    const c = rate > 0 && cdmg > 0 && Math.random() * 100 < rate;
-    if (c) d *= 1 + (cdmg - (cdmg <= 200 ? 100 : 200)) * 0.01;
+    let rate, critDmg;
+    if (crit) {
+      rate = crit.rate || 0;
+      critDmg = crit.dmg || 0;
+      if ((Math.floor(job / 100) === 22 || job === 2001) && sb.level(CRITICAL_MAGIC)) {
+        const cm = sb.levelData(CRITICAL_MAGIC);
+        rate += num(cm?.prop);
+        critDmg += Math.max(0, Math.round(((num(cm?.damage) || 100) - 100) * 0.5));
+      }
+      rate = clamp(rate, 0, 100);
+    } else {
+      const se = (this.buffs || []).find((b) => b.sharpEyes && b.until > now)?.sharpEyes;
+      let cdmg = se?.dmg || 0;
+      rate = clamp(se?.rate || 0, 0, 100);
+      if ((Math.floor(job / 100) === 22 || job === 2001) && sb.level(CRITICAL_MAGIC)) { const cm = sb.levelData(CRITICAL_MAGIC); rate += num(cm?.prop); cdmg += num(cm?.damage); }
+      critDmg = cdmg > 0 ? 100 + (cdmg - (cdmg <= 200 ? 100 : 200)) : 0;
+    }
+    const c = rate > 0 && critDmg > 100 && Math.random() * 100 < rate;
+    if (c) d = (d * critDmg) / 100;
     // Pig's, Stump's and Slime's Weakness (your line's own): their damage % on their monster
     const line = Math.floor(job / 100) === 22 || job === 2001 ? 2001 : Math.floor(job / 1000) * 1000;
     for (const id of [9000, 9001, 9002].map((x) => line * 10000 + x)) if (sb.level(id) && num(sb.node(id)?.mobCode) === m.spawn?.id) d *= num(sb.levelData(id)?.damage) * 0.01;
@@ -11709,8 +11726,9 @@ export class Game {
     if (!chairInfo?.removeBody) {
       drawParts(ctx, this.assets, whole, sx + cbx, sy + cby, mirror, (seeThrough ? 0.5 : 1) * (ghost?.alpha ?? 1), !dead, held);
     }
-    if (chair) this.drawChair(ctx, chair, sx, sy, cby, chairRight, 'front');
     if (blink) ctx.restore();
+    if (chair) this.drawChair(ctx, chair, sx, sy, cby, chairRight, 'front');
+    if (!dead) this.drawMapEffect(ctx, ent, sx, sy);
     this.drawItemFx(ctx, cam, ent, parts, true, fxDx, fxDy);
     this.drawEquipFx(ctx, cam, ent, parts, true, fxDx, fxDy);
     this.drawSetFx(ctx, cam, ent, true, fxDx, fxDy);
