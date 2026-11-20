@@ -468,6 +468,7 @@ export class ChannelSession {
         for (let n = r.ubyte(); n > 0; n--) ids.push(r.int());
         this.emit('status', { type: mode === 8 ? 'expired' : mode === 0x0B ? 'sealExpired' : 'timeLimit', ids });
       } else if (mode === 0x0C) { for (let n = r.ubyte(); n > 0; n--) this.emit('notice', { type: 5, msg: r.string() }); }
+      else if (mode === 0x0E) this.emit('status', { type: 'nx', amount: r.int() });
     });
 
     // SERVERMESSAGE: 0 notice, 1 pop-up, 2 Megaphone, 3 Super Megaphone (+ channel, whisper ear), 4 the scrolling
@@ -494,6 +495,7 @@ export class ChannelSession {
       } catch { /* an older server's shorter form: the text alone */ }
       // a server with USE_DEBUG on reports every hit ("Hitted MOB 100100, OID 1234"): not for the chat log
       if (type === 5 && /^Hitted (MOB|REACTOR) /.test(n.msg)) return;
+      if (type === 5 && n.msg === '[VOYAGE_PORTSHOP]') { this.emit('openPortShop'); return; }
       this.emit('notice', n);
     });
     // SPOUSE_CHAT: a line between husband and wife (5: from whom, 5, the text), echoed to both

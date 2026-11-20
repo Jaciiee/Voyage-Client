@@ -86,6 +86,32 @@ app.use('/assets', express.static(ASSETS_DIR, { maxAge: '1d', fallthrough: false
 });
 app.get('/servers.json', (req, res) => res.json(Object.keys(SERVERS)));
 app.get('/config.json', (req, res) => res.set('Cache-Control', 'no-store').json({ ...CLIENT_CONFIG, custom: customs.now().versions }));
+app.get('/api/drops', async (req, res) => {
+  const host = SERVERS[req.query.server] ?? Object.values(SERVERS)[0];
+  if (!host) { res.status(503).json({ error: 'No game server configured.' }); return; }
+  const params = new URLSearchParams();
+  if (req.query.mob) params.set('mob', String(req.query.mob));
+  if (req.query.item) params.set('item', String(req.query.item));
+  if (req.query.map) params.set('map', String(req.query.map));
+  try {
+    const upstream = await fetch(`http://${host}:8585/api/drops?${params.toString()}`, { signal: AbortSignal.timeout(4000) });
+    const text = await upstream.text();
+    res.status(upstream.status).type('application/json').send(text);
+  } catch (err) {
+    res.status(502).json({ error: `Drop Wiki unavailable: ${err.message}` });
+  }
+});
+app.get('/api/ported', async (req, res) => {
+  const host = SERVERS[req.query.server] ?? Object.values(SERVERS)[0];
+  if (!host) { res.status(503).json({ error: 'No game server configured.' }); return; }
+  try {
+    const upstream = await fetch(`http://${host}:8585/api/ported`, { signal: AbortSignal.timeout(8000) });
+    const text = await upstream.text();
+    res.status(upstream.status).type('application/json').send(text);
+  } catch (err) {
+    res.status(502).json({ error: `Port Shop unavailable: ${err.message}` });
+  }
+});
 // Which build the server has now: a page still running an older one tells its player to reload.
 app.get('/build.json', (req, res) => res.set('Cache-Control', 'no-store').json({ id: BUILD_ID }));
 // The page is never kept by the browser and asks for the script and the stylesheet by the build's id, so a reload

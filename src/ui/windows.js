@@ -713,7 +713,7 @@ const AP_ROWS = { hp: 117, mp: 135, str: 247, dex: 265, int: 283, luk: 301 };
 const STATS = ['str', 'dex', 'int', 'luk'];
 /** The stats each branch doesn't use, shown with greyed labels. */
 const GREY_STATS = { 0: ['int', 'luk'], 1: ['int', 'luk'], 2: ['str', 'dex'], 3: ['int', 'luk'], 4: ['str', 'int'], 5: ['int', 'luk'] };
-const DETAIL_X = 170, DETAIL_Y = 144;
+const DETAIL_X = 170, DETAIL_EXTRA_ROWS = 2, DETAIL_EXTRA_H = DETAIL_EXTRA_ROWS * 18, DETAIL_Y = 144 - DETAIL_EXTRA_H, DETAIL_H = 203 + DETAIL_EXTRA_H;
 const HPMP_ASK = 'If you invest your AP in HP or MP, your character may have\ninsufficient stats to become as strong as it could be.\nDo you still wish to raise this skill?';
 const isStarter = (job) => [0, 1000, 2000, 2001].includes(job);
 /** Auto-Assign's two targets [[stat, target], [main stat, target]] for a job at level L, or null; flag 0 picks the gunslinger split at job 500. */
@@ -760,7 +760,7 @@ class StatWin extends Win {
     this.ap = Object.entries(AP_ROWS).map(([k, y]) => Object.assign(this.button(W.BtApUp, 153, y, () => this.raise(k)), { stat: k }));
     this.auto = [this.button(W.BtAuto, 97, 197, () => this.autoAssign(1)), this.button(W.BtAuto1, 97, 197, () => this.autoAssign(1)), this.button(W.BtAuto2, 97, 217, () => this.autoAssign(0))];
     this.button(W.BtDetail, 121, 324, () => { this.detail = !this.detail; });
-    this.hideBtn = this.button(mgr.B.BtHide, DETAIL_X + 155, DETAIL_Y + 182, () => { this.detail = !this.detail; });
+    this.hideBtn = this.button(mgr.B.BtHide, DETAIL_X + 155, DETAIL_Y + 182 + DETAIL_EXTRA_H, () => { this.detail = !this.detail; });
   }
   /** The first job advancement's guide balloons, for this opening only (job: the new job). */
   showGuide(job) { this.guide = [STAT_GUIDE_AUTO, ...(STAT_GUIDE[job] || [])]; }
@@ -800,17 +800,54 @@ class StatWin extends Win {
   frames() { return [...super.frames(), this.W.backgrnd2, this.W.basicStat, ...allCanvases(this.W.Job), ...allCanvases(this.W.Disabled)]; }
   contains(x, y) {
     const lx = x - this.x, ly = y - this.y;
-    return super.contains(x, y) || (this.panelShown && lx >= this.panelX && lx < this.panelX + 177 && ly >= DETAIL_Y && ly < DETAIL_Y + 203);
+    return super.contains(x, y) || (this.panelShown && lx >= this.panelX && lx < this.panelX + 177 && ly >= DETAIL_Y && ly < DETAIL_Y + DETAIL_H);
+  }
+  /** Draw a blue MapleStory-style stat badge in the extended detail rows matching backgrnd2.png. */
+  drawCritBadge(ctx, x, y, label) {
+    const w = 60, h = 15, r = 3;
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, r);
+    const grad = ctx.createLinearGradient(0, y, 0, y + h);
+    grad.addColorStop(0, '#6290c4');
+    grad.addColorStop(1, '#4170a4');
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.strokeStyle = '#325277';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.font = 'bold 9px Tahoma, Arial, sans-serif';
+    ctx.fillStyle = '#fff';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, x + 5, y + 8);
+    ctx.restore();
   }
   draw(ctx) {
     // the detail panel goes behind the main one, its BtHide with it
     const shown = this.panelShown, hide = this.hideBtn;
     hide.x = this.panelX + 155;
+    hide.y = DETAIL_Y + 182 + DETAIL_EXTRA_H;
     hide.visible = false;
     if (shown) {
       ctx.save(); ctx.translate(this.x, this.y);
       const bg2 = this.mgr.image(this.W.backgrnd2);
-      if (bg2) ctx.drawImage(bg2, this.panelX, DETAIL_Y);
+      if (bg2) {
+        const splitY = 169;
+        // Top frame + 9 standard rows
+        ctx.drawImage(bg2, 0, 0, bg2.width, splitY, this.panelX, DETAIL_Y, bg2.width, splitY);
+        // 2 extra rows for CRIT RATE and CRIT DMG, reusing the right value box & window borders from row 8
+        const labels = ['CRIT RATE', 'CRIT DMG'];
+        for (let r = 0; r < DETAIL_EXTRA_ROWS; r++) {
+          const dy = DETAIL_Y + splitY + r * 18;
+          ctx.fillStyle = '#fff';
+          ctx.fillRect(this.panelX + 12, dy, 63, 18);
+          ctx.drawImage(bg2, 0, 151, 13, 18, this.panelX, dy, 13, 18);
+          ctx.drawImage(bg2, 74, 151, bg2.width - 74, 18, this.panelX + 74, dy, bg2.width - 74, 18);
+          this.drawCritBadge(ctx, this.panelX + 13, dy, labels[r]);
+        }
+        // Bottom margin + grey footer
+        ctx.drawImage(bg2, 0, splitY, bg2.width, bg2.height - splitY, this.panelX, DETAIL_Y + splitY + DETAIL_EXTRA_H, bg2.width, bg2.height - splitY);
+      }
       if (this.g.stats) this.drawDetail(ctx);
       hide.visible = true; hide.draw(ctx, this.mgr.assets); hide.visible = false;
       ctx.restore();
@@ -837,7 +874,27 @@ class StatWin extends Win {
       if (lx > 61 && lx < 172 && ly > 140 && ly < 155) return lineTip(`EXP : ${s.exp} / ${EXP[s.level] || 0}`, 6, 2);
       return pick(this.help?.Stat, lx, ly, isStarter(s.job) && s.level <= 10 ? 8 : Infinity);
     }
-    return this.panelShown ? pick(this.help?.StatDetail, lx - this.panelX, ly - DETAIL_Y) : null;
+    if (!this.panelShown) return null;
+    const dx = lx - this.panelX, dy = ly - DETAIL_Y;
+    if (dx >= 13 && dx < 166) {
+      if (dy >= 169 && dy < 186) {
+        const ci = this.g.statWindow().critInfo;
+        const parts = [`Base ${ci.baseRate}%`];
+        if (ci.jobRate) parts.push(`Job +${ci.jobRate}%`);
+        if (ci.passiveRate) parts.push(`Skills +${ci.passiveRate}%`);
+        if (ci.buffRate) parts.push(`Buffs +${ci.buffRate}%`);
+        return helpTip('Critical Rate', `Chance for any attack, skill, or spell to land a critical hit (max 100%).\n${parts.join('  |  ')}`);
+      }
+      if (dy >= 187 && dy < 204) {
+        const ci = this.g.statWindow().critInfo;
+        const parts = [`Base ${ci.baseDmg}%`];
+        if (ci.jobDmg) parts.push(`Job +${ci.jobDmg}%`);
+        if (ci.passiveDmg) parts.push(`Skills +${ci.passiveDmg}%`);
+        if (ci.buffDmg) parts.push(`Buffs +${ci.buffDmg}%`);
+        return helpTip('Critical Damage', `Total damage multiplier dealt on a critical hit.\n${parts.join('  |  ')}`);
+      }
+    }
+    return pick(this.help?.StatDetail, dx, dy);
   }
   /** Arial 12 with its font cell's top at y. */
   t(ctx, text, x, y, o = {}) { this.text(ctx, text, x, y + 11, { size: 12, base: 'alphabetic', ...o }); }
@@ -878,11 +935,12 @@ class StatWin extends Win {
   }
   drawDetail(ctx) {
     const g = this.g, d = g.statWindow(), x = this.panelX + 77, y = (i) => DETAIL_Y + 8 + 18 * i;
-    const buffed = ([v, b]) => (b ? [`${v + b} (${v}${b > 0 ? '+' : ''}${b})`, b > 0 ? '#ff2020' : '#2000ff'] : [v, '#000']);
+    const buffed = ([v, b], suffix = '') => (b ? [`${v + b}${suffix} (${v}${b > 0 ? '+' : ''}${b})`, b > 0 ? '#ff2020' : '#2000ff'] : [`${v}${suffix}`, '#000']);
     const rows = [
       [d.attack ? `${d.attack[0]} ~ ${d.attack[1]}` : 0, g.buffValue('watk') ? '#ff2020' : '#000'],
       buffed(d.wdef), buffed(d.matk), buffed(d.mdef), buffed(d.acc), buffed(d.avoid), buffed(d.hands),
       [`${d.speed}%`, '#000'], [`${d.jump}%`, '#000'],
+      buffed(d.critRate, '%'), buffed(d.critDmg, '%'),
     ];
     rows.forEach(([text, color], i) => this.t(ctx, text, x, y(i), { color }));
   }

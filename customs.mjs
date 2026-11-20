@@ -14,37 +14,65 @@ export class Customs {
   constructor(assetsDir) {
     this.dir = path.join(assetsDir, 'customs');
     this.read = 0;
+    this.scanning = null;
     this.list = { versions: {}, imgs: new Set() };
+    this.refresh().catch(() => {});
   }
 
   /**
-   * What the customs folder holds now: `versions`, a version for each .img it changes (its JSON or any of its
-   * pictures: "Npc/9010000.img") and for each other file it has ("Npc/_custom/npcs/x.png"); `imgs`, the .imgs it
-   * changes, which are served as they are rather than from the sheets.
+   * Returns the latest cached customs snapshot immediately (non-blocking) and triggers a background
+   * refresh when stale so /config.json never stalls on slow Docker bind mounts.
    */
   now() {
-    if (Date.now() - this.read < 2000) return this.list;
-    const versions = {}, imgs = new Set();
-    const walk = (dir, rel) => {
-      let entries;
-      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-      for (const e of entries) {
-        const r = rel ? `${rel}/${e.name}` : e.name;
-        if (e.isDirectory()) { walk(path.join(dir, e.name), r); continue; }
-        let mtime = 0;
-        try { mtime = fs.statSync(path.join(dir, e.name)).mtimeMs; } catch { continue; }
-        // the .img a file belongs to: its JSON, or a picture in its folder
-        const m = /^(.*?\.img)(?:\.json$|\/)/.exec(r);
-        const key = m ? m[1] : r;
-        if (m) imgs.add(key);
-        versions[key] = Math.max(versions[key] || 0, Math.floor(mtime));
-      }
-    };
-    walk(this.dir, '');
-    for (const k of Object.keys(versions)) versions[k] = versions[k].toString(36);
-    this.list = { versions, imgs };
-    this.read = Date.now();
+    const ttl = this.list.imgs.size > 500 ? 60000 : 2000;
+    if (Date.now() - this.read >= ttl && !this.scanning) {
+      this.refresh().catch(() => {});
+    }
     return this.list;
+  }
+
+  async refresh() {
+    if (this.scanning) return this.scanning;
+    this.scanning = (async () => {
+      const versions = {}, imgs = new Set();
+      const skipSubtree = (r) => r.startsWith('Character/') || r.startsWith('Item/') || r.startsWith('UI/') || r.startsWith('Effect/');
+      const walk = async (dir, rel) => {
+        let entries;
+        try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return; }
+        const subdirs = [];
+        const files = [];
+        for (const e of entries) {
+          const r = rel ? `${rel}/${e.name}` : e.name;
+          if (e.isDirectory()) {
+            if (e.name.endsWith('.img') && skipSubtree(r)) {
+              imgs.add(r);
+              if (!(r in versions)) versions[r] = 1;
+            } else {
+              subdirs.push(walk(path.join(dir, e.name), r));
+            }
+            continue;
+          }
+          files.push([e.name, r, path.join(dir, e.name)]);
+        }
+        // Batch stat calls cleanly to maximize throughput on Windows/Docker bind mounts
+        for (let i = 0; i < files.length; i += 64) {
+          await Promise.all(files.slice(i, i + 64).map(async ([, r, full]) => {
+            let mtime = 0;
+            try { mtime = (await fs.promises.stat(full)).mtimeMs; } catch { return; }
+            const m = /^(.*?\.img)(?:\.json$|\/)/.exec(r);
+            const key = m ? m[1] : r;
+            if (m) imgs.add(key);
+            versions[key] = Math.max(versions[key] || 0, Math.floor(mtime));
+          }));
+        }
+        await Promise.all(subdirs);
+      };
+      await walk(this.dir, '');
+      for (const k of Object.keys(versions)) versions[k] = versions[k].toString(36);
+      this.list = { versions, imgs };
+      this.read = Date.now();
+    })().finally(() => { this.scanning = null; });
+    return this.scanning;
   }
 
   /** Whether the customs folder changes this .img ("Npc/9010000.img"): then the sheets leave it to the files. */

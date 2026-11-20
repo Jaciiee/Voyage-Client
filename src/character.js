@@ -123,7 +123,7 @@ export class CharacterLook {
     this.deadKeep = new Set(eq.map((n, i) => n && [100, 101, 102, 103].includes(Math.floor(ids[i] / 10000)) ? n : null).filter(Boolean));
     // what a ghost keeps on: the cap, eye accessory and earrings (and its hair)
     this.ghostKeep = new Set(eq.map((n, i) => n && [100, 102, 103].includes(Math.floor(ids[i] / 10000)) ? n : null).filter(Boolean));
-    this.hasCap = ids.some((id) => Math.floor(id / 10000) === 100);
+    this.hasCap = eq.some((n, i) => n && cat(i) === 100 && String(n.info?.vslot || '').includes('H1'));
     // a label / quote ring changes the name tag / chat balloon (the last ring with one wins); some equips (the effect
     // rings) carry an effect of their own
     this.nameTag = 0; this.chatBalloon = 0; this.equipFx = [];
@@ -248,9 +248,9 @@ export class CharacterLook {
       const ex = expr && this.face?.[expr.name], node = ex?.[expr.frame] ?? (ex && Object.values(ex).some(isCanvas) ? ex : null);
       const ready = this.exprReady(node);
       if (node && !ready) this.unready = true;   // the default face until the expression's art is in
-      add(ready ? node : this.face?.default);
+      add(ready ? node : (this.face?.default ?? this.face?.blink?.['0']));
     }
-    const hairFrame = this.hair?.[ha]?.[hf] ?? this.hair?.default;
+    const hairFrame = this.hair?.[ha]?.[hf] ?? (back ? (this.hair?.backDefault ?? this.hair?.default) : this.hair?.default);
     add(hairFrame, (v) => {
       const z = v.z || '';
       if (z === 'hairShade') return false;
@@ -345,14 +345,22 @@ export function mountPose(mountId, action, tired) {
  * ms is the time in this pose. gear: the saddle / mount equipment images (or null).
  */
 export function composeMounted(look, mount, mountId, action, expr, ms, tired = false, gear = []) {
-  const pose = mountPose(mountId, action, tired);
-  const rider = look.compose(action === 'ladder' || action === 'rope' ? 'rope' : 'sit', 0, expr, true);
+  const isChairMount = Math.floor(mountId / 10000) === 198;
+  const pose = isChairMount ? (mount.sit ? 'sit' : 'stand1') : mountPose(mountId, action, tired);
   const anim = frames(mount[pose] || mount.stand1);
-  if (!anim.length) return rider;
+  if (!anim.length) return look.compose(action === 'ladder' || action === 'rope' ? 'rope' : 'sit', 0, expr, true);
   const total = anim.reduce((t, f) => t + (Number(f.delay) || 100), 0);
   let t = ms % total, index = 0;
   for (let i = 0; i < anim.length; i++) { const d = Number(anim[i].delay) || 100; if (t < d) { index = i; break; } t -= d; }
-  const canvases = Object.values(anim[index]).filter(isCanvas);
+  const curFrame = anim[index];
+  const rootAct = typeof mount.characterAction?.['0'] === 'string' ? mount.characterAction['0'] : null;
+  const forcedAct = typeof curFrame?.forceCharacterAction === 'string' ? curFrame.forceCharacterAction : rootAct;
+  const riderPose = isChairMount
+    ? (forcedAct && look.has(forcedAct) ? forcedAct : 'sit')
+    : (action === 'ladder' || action === 'rope' ? 'rope' : 'sit');
+  const riderFrame = isChairMount ? (Number(curFrame?.forceCharacterActionFrameIndex) || 0) : 0;
+  const rider = look.compose(riderPose, riderFrame, expr, true);
+  const canvases = Object.values(curFrame).filter(isCanvas);
   if (Math.floor(mountId / 10000) === 190) {
     for (const g of gear) {
       const gf = g?.[mountId]?.[mount[pose] ? pose : 'stand1']?.[index];
@@ -372,6 +380,8 @@ export function composeMounted(look, mount, mountId, action, expr, ms, tired = f
   out.sort((a, b) => b.z - a.z);
   out.brow = rider.brow && [rider.brow[0] + dx, rider.brow[1] + dy];
   out.navel = navel;
+  out.riderDx = dx;
+  out.riderDy = dy;
   out.pose = pose;
   return out;
 }

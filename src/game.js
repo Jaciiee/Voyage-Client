@@ -4,6 +4,7 @@ import { CharacterLook, drawParts, lookCanvases, equipPath, composeMounted, moun
 import { weaponMultiplier, itemIcon, itemRewardIcon, itemSpec, itemReward, itemInfo, mesoIcon, invType, isScroll, scrollFits, ACTIONS, EXP, itemName, advanceName } from './data.js';
 import { stanceByte, STANCE_NAMES, lookEquipIds } from './net/proto.js';
 import { Hud } from './ui/hud.js';
+import { VoyageWidgets } from './ui/voyage-widgets.js';
 import { QuestBook, TITLE_AREA } from './quests.js';
 import { MedalWin } from './ui/medal.js';
 import { MemoWin } from './ui/memo.js';
@@ -12,7 +13,7 @@ import { npcTalk, localTalk, NpcDialog, SlideMenu, PetSelectDialog, ShopWin, dra
 import { npcQuestMenu, playQuestLines, questFlow } from './ui/quests-ui.js';
 import { QuestMessages } from './ui/questmsg.js';
 import { QuestAlert } from './questalert.js';
-import { SkillBook, skillMaxDamage, critical, RANGED_WEAPONS, NO_AMMO_SHOTS } from './skills.js';
+import { SkillBook, skillMaxDamage, critical, criticalBreakdown, RANGED_WEAPONS, NO_AMMO_SHOTS } from './skills.js';
 import { CODE_TO_SC, defaultKeymap, ACTION, MENU, DEFAULT_QUICKSLOTS, DEFAULT_QUICKSLOTS2, loadQuickKeys2 } from './keymap.js';
 import { loadControls } from './controls.js';
 import { PadInput } from './gamepad.js';
@@ -916,7 +917,10 @@ export class Game {
       if (tw?.rclick) { tw.rclick(p[0] - tw.x, p[1] - tw.y); return; }
       // right-click another player: the ContextMenu (Info, Save, Trade, Whisper, Party, Guild, Report, Family)
       const rp = !wm.top(...p) && !sb.contains(...p) && this.playerAt(...field(e));
-      if (rp && this.net) wm.show(new PlayerMenu(wm, rp, Math.round(p[0]), Math.round(p[1])));
+      if (rp && this.net) { wm.show(new PlayerMenu(wm, rp, Math.round(p[0]), Math.round(p[1]))); return; }
+      // right-click a monster: open the In-Game Drop Wiki for that monster
+      const mob = !wm.top(...p) && !sb.contains(...p) && this.mobAt(...field(e));
+      if (mob) this.widgets?.openDropWikiMob(mob.spawn?.id || mob.id);
     });
     // double-click a character (yourself included) for their Character Info
     c.addEventListener('dblclick', (e) => {
@@ -1166,6 +1170,15 @@ export class Game {
     return 0;
   }
   playerAt(x, y) { for (const rp of this.others.values()) if (this.hitsChar(rp, x, y)) return rp; return null; }
+  mobAt(x, y) {
+    const wx = x + snapPx(this.cam.x), wy = y + snapPx(this.cam.y);
+    for (const e of this.map?.life || []) {
+      if (e.kind !== 'Mob' || !e.alive || e.dying) continue;
+      const b = e.hitBox?.();
+      if (b && wx >= b.left - 8 && wx <= b.right + 8 && wy >= b.top - 8 && wy <= b.bottom + 8) return e;
+    }
+    return null;
+  }
   hitsChar(ent, x, y) {
     const wx = x + snapPx(this.cam.x), wy = y + snapPx(this.cam.y);
     const box = ent.morphView?.box(ent.x, ent.y, drawnRight(ent));   // morphed: the frame's lt / rb
@@ -2277,7 +2290,10 @@ export class Game {
     const layer = (n) => {
       const anim = new Anim(n);
       this.assets.preload(anim.frames);
-      return { anim, z: Number(n.z) || 0, head: Number(n.pos) === 1 || Number(e.follow) === 1, fixed: !!Number(n.fixed), loose: Number(n.loose) || 0 };
+      const z = n.z !== undefined ? Number(n.z) : Number(e.z) || 0;
+      const pos = n.pos !== undefined ? Number(n.pos) : Number(e.pos) || 0;
+      const fixed = n.fixed !== undefined ? !!Number(n.fixed) : !!Number(e.fixed);
+      return { anim, z, head: pos === 1 || Number(e.follow) === 1, fixed, loose: Number(n.loose ?? e.loose) || 0 };
     };
     if (Number(e.follow)) {
       const out = [];
@@ -2348,8 +2364,7 @@ export class Game {
    * A character's item effect behind it (z < 0, and the spectrum's copies) or in front. pos 1 (and the trailing
    * ones) hang from the head (the brow), the rest from the feet; a `loose` one lags behind by its loose %.
    */
-  drawItemFx(ctx, cam, ent, parts, front, dx = 0, dy = 0) {
-    const fx = ent.itemFx;
+  drawItemFx(ctx, cam, ent, parts, front, dx = 0, dy = 0, fx = ent.itemFx) {
     if (!fx?.layers) return;
     const right = drawnRight(ent);
     const now = performance.now(), e = fx.node, dir = right ? -1 : 1, brow = parts.brow || [0, -55];
@@ -3020,6 +3035,7 @@ export class Game {
     this.bindUiPointer();
     this.hud = new Hud(uiRoot, this);
     this.hud.update(this.stats);
+    this.widgets = new VoyageWidgets(this, uiRoot);
     this.quests = new QuestBook(this.assets);
     this.quests.now = () => this.serverNow();
     this.questMsg = new QuestMessages(); this.questTimers = new Map();
@@ -3079,7 +3095,7 @@ export class Game {
         if (this.yellowTipShown && !again) return;
         if (a) { for (const t of [a, b]) if (t) this.hud.message(t, '#ffff00'); this.yellowTipShown = true; }
       },
-      status: (s) => this.hud.status(s),
+      status: (s) => { this.hud.status(s); if (s.type === 'exp') this.widgets?.recordExp(s.amount, s.bonus); },
       notice: (n) => this.hud.notice(n),
       fame: (f) => this.onFame(f),
       exclusiveAnswered: () => { this.releaseExclusive(); this.fieldMode?.win?.answered?.(); },
@@ -3335,6 +3351,7 @@ export class Game {
         this.refreshTownDoors(true);
       }),
       showChair: later((id, itemId) => { const rp = this.others.get(id); if (rp) rp.chair = itemId; if (itemId) this.chairArt(itemId); }),
+      openPortShop: () => this.widgets?.openPortShop(),
       cancelChair: later((seat) => { if (seat < 0 && this.player.seat) this.standUp(false); }),
       removePlayer: later((id) => { this.spawning?.delete(id); this.vfx?.untomb(this.others.get(id)); this.others.delete(id); this.dragons.delete(id); for (const [k, p] of this.pets) if (p.owner === id) this.pets.delete(k); }),
       spawnDragon: later((d) => this.dragons.set(d.owner, new Dragon(d))),
@@ -4101,6 +4118,7 @@ export class Game {
     if (enable) { this.apPending = false; this.scriptPending = 0; this.cashBusy = false; this.pickupAnswered(); }
     const before = this.stats.level, exp0 = this.stats.exp, job0 = this.stats.job;
     Object.assign(this.stats, s);
+    if (s.skin !== undefined || s.face !== undefined || s.hair !== undefined) this.rebuildLook();
     if (s.level > before) this.petEvent('e_levelup');
     else if (s.exp > exp0 && s.exp >= (EXP[this.stats.level] || Infinity) * 0.9 && performance.now() - (this.petPreLevelT ?? -Infinity) >= 420000) { this.petPreLevelT = performance.now(); this.petEvent('e_prelevelup'); }
     this.petAutoPot('mp');
@@ -4749,6 +4767,7 @@ export class Game {
   /** Drops still held or loading belong to the map they fell on, and so do the monsters still dying there. */
   clearDrops() {
     this.drops.clear();
+    this.widgets?.clearMapDrops();
     this.dying?.clear();
     for (const d of this.pendingDrops.values()) d.gone = true;
     this.pendingDrops.clear();
@@ -4785,6 +4804,7 @@ export class Game {
     // freeAt: when anyone may take it after 15s counts from (its arrival plus the packet's delay, as the client)
     this.drops.set(d.oid, { ...d, y, anim, landed: d.mode === 2, age: 0, born: performance.now(), freeAt: performance.now() + (d.delay || 0), cx: fromX, cy: fromY, fromX, fromY, alpha: 1, phase: 0,
       spin: !d.meso && !reward, angle: 0, speed, flight });
+    this.widgets?.onDropSpawn(d);
   }
 
   removeDrop(oid, anim, chr, petSlot = -1, delay = 0) {
@@ -4905,10 +4925,17 @@ export class Game {
 
   async rebuildLook() {
     const s = this.stats;
+    if (!s) return;
+    const seq = (this._lookSeq = (this._lookSeq || 0) + 1);
     const look = new CharacterLook(this.assets, { skin: s.skin, face: s.face, hair: s.hair, gender: s.gender, equips: this.forcedEquips || equippedIds(this.inventory.equipped) });
     await look.load();
-    await this.assets.preload(lookCanvases(look, PRELOAD_ACTIONS));
+    const preloadActs = this.player?.action && !PRELOAD_ACTIONS.includes(this.player.action)
+      ? [...PRELOAD_ACTIONS, this.player.action]
+      : PRELOAD_ACTIONS;
+    await this.assets.preload(lookCanvases(look, preloadActs));
+    if (seq !== this._lookSeq) return;
     this.look = look;
+    if (this.player) { this.player.wholeSprite = null; this.player.wholeParts = null; }
     this.assets.preload(lookCanvases(look, look.actionList()), null, 1); // skill animations, in the background
   }
 
@@ -5161,20 +5188,41 @@ export class Game {
     const name = look?.medal ? (this.windows.itemName(look.medal) || '').replace("'s Medal", '') : '', art = name && this.nameTagArt();
     if (art && artTag(ctx, this.assets, art.medal?.[look.medalTag], name, x, y) < 0) nameTag(ctx, name, x, y);
   }
-  /** A character's equip effects (EquipEffect), kept in step with what its look wears. */
+  /** A character's equip effects (EquipEffect + worn ItemEff animations), kept in step with what its look wears. */
   stepEquipFx(ent, look, dt) {
     const want = look?.equipFx || [];
-    if (!want.length && !ent.equipFx?.length) return;
-    if (!this.charEff) { this.charEff = this.assets.json('Effect/CharacterEff.img').then((j) => { this.charEff = j || null; }); return; }
-    if (this.charEff instanceof Promise) return;
-    if (want.length !== ent.equipFx?.length || want.some((w, i) => w.id !== ent.equipFx[i].id)) {
-      ent.equipFx = want.map((w) => ent.equipFx?.find((f) => f.id === w.id)
-        || new EquipEffect(w.id, w.effect, String(w.effect.path).split('/').slice(2).reduce((n, k) => n?.[k], this.charEff)));
+    if (want.length || ent.equipFx?.length) {
+      if (!this.charEff) { this.charEff = this.assets.json('Effect/CharacterEff.img').then((j) => { this.charEff = j || null; }); }
+      else if (!(this.charEff instanceof Promise)) {
+        if (want.length !== ent.equipFx?.length || want.some((w, i) => w.id !== ent.equipFx[i].id)) {
+          ent.equipFx = want.map((w) => ent.equipFx?.find((f) => f.id === w.id)
+            || new EquipEffect(w.id, w.effect, String(w.effect.path).split('/').slice(2).reduce((n, k) => n?.[k], this.charEff)));
+        }
+        const moving = ent.equipFxX !== undefined && Math.abs(ent.x - ent.equipFxX) > 0.5;
+        ent.equipFxX = ent.x;
+        const right = drawnRight(ent);
+        for (const f of ent.equipFx) f.update(dt, f.head ? ent.browAt || { x: ent.x, y: ent.y - 55 } : ent, right, moving);
+      }
     }
-    const moving = ent.equipFxX !== undefined && Math.abs(ent.x - ent.equipFxX) > 0.5;
-    ent.equipFxX = ent.x;
-    const right = drawnRight(ent);
-    for (const f of ent.equipFx) f.update(dt, f.head ? ent.browAt || { x: ent.x, y: ent.y - 55 } : ent, right, moving);
+
+    // Animated NX equips (Capes, Wings, Hallow/Auras, Hats) whose sprite frames live in Effect/ItemEff.img/<id>/effect
+    const wornIds = look?.shownIds || look?.equipIds || [];
+    if (!wornIds.length && !ent.wearItemFx?.length) return;
+    if (!this.itemEff) { this.itemEff = this.assets.json('Effect/ItemEff.img').then((j) => { this.itemEff = j || null; }); return; }
+    if (this.itemEff instanceof Promise) return;
+    const fxIds = wornIds.filter((id) => this.itemEff?.[id]?.effect);
+    const prev = ent.wearItemFx || [];
+    if (fxIds.length !== prev.length || fxIds.some((id, i) => id !== prev[i].id)) {
+      ent.wearItemFx = fxIds.map((id) => prev.find((f) => f.id === id)
+        || { id, node: this.itemEff[id].effect, layers: null, action: null });
+    }
+    for (const fx of ent.wearItemFx || []) {
+      if (!fx.layers || (Number(fx.node.action) && fx.action !== ent.action)) {
+        fx.action = ent.action;
+        fx.layers = this.itemFxLayers(fx.node, ent.action);
+      }
+      for (const l of fx.layers) l.anim.update(dt * 1000);
+    }
   }
   drawEquipFx(ctx, cam, ent, parts, front, dx = 0, dy = 0) {
     const brow = parts.brow || [0, -55], x = ent.x + dx, y = ent.y + dy, right = drawnRight(ent);
@@ -5182,6 +5230,9 @@ export class Game {
     for (const f of ent.equipFx || []) {
       const at = f.head ? ent.browAt : { x, y };
       f.draw(ctx, this.assets, { x: at.x - cam.x, y: at.y - cam.y }, right, front, cam.x, cam.y);
+    }
+    for (const fx of ent.wearItemFx || []) {
+      this.drawItemFx(ctx, cam, ent, parts, front, dx, dy, fx);
     }
   }
   /** The slot an equip goes to: a cash one (info/cash) covers the regular slot from its cash slot, 100 below. */
@@ -5762,6 +5813,25 @@ export class Game {
     try { return JSON.parse(localStorage.getItem('maple.gameopt') || '{}')[key] !== false; } catch { return true; }
   }
   sendChat(text) {
+    // /meter: toggle the EXP/hr & DPS Meter overlay
+    if (/^\/meter$/i.test(text.trim())) {
+      settings.hudMeter = !settings.hudMeter; saveSettings();
+      this.widgets?.syncVisibility();
+      this.hud?.message?.(`EXP/hr & DPS Meter is ${settings.hudMeter ? 'on' : 'off'}. Type /meter again to ${settings.hudMeter ? 'hide' : 'show'} it.`, CHAT_COLORS.notice);
+      return;
+    }
+    // /lootbeams: toggle Rare Drop Loot Beams & Toasts
+    if (/^\/lootbeams$/i.test(text.trim())) {
+      settings.lootBeams = !(settings.lootBeams !== false); saveSettings();
+      this.hud?.message?.(`Rare Drop Loot Beams are ${settings.lootBeams ? 'on' : 'off'}.`, CHAT_COLORS.notice);
+      return;
+    }
+    // /drops [query] or /wiki [query]: open In-Game Drop Wiki Modal
+    const dropMatch = text.trim().match(/^\/(?:drops|wiki)(?:\s+(.+))?$/i);
+    if (dropMatch) {
+      this.widgets?.openDropWiki(dropMatch[1] || '');
+      return;
+    }
     // /fps: the performance meter on or off (a Voyage tool, kept with the System Option choices)
     if (/^\/fps$/i.test(text.trim())) {
       settings.fpsMeter = !settings.fpsMeter; saveSettings();
@@ -6997,12 +7067,16 @@ export class Game {
     const roll = () => (skillId === SNIPE ? Math.trunc(199999 - Math.random() * 10000)
       : ld?.fixdamage ? ld.fixdamage : Math.max(1, Math.round(max * (0.5 + Math.random() * 0.5))));
     const fixedPhys = !!ld?.fixdamage && (kind === 'ranged' || kind === 'melee');
-    // magic and fixed-damage skills never crit; the server tells a critical by its going over the plain maximum
-    let crit = this.net && kind !== 'magic' && !ld?.fixdamage ? critical(this, wcat, kind === 'ranged') : null, pct = ld?.damage || 100;
-    // Assassinate's second stage crits by its own prop and criticalDamage (Sharp Eyes on top)
+    // Fixed-damage skills never crit; all other physical, ranged, magic, and basic attacks can roll crits.
+    let crit = this.net && !ld?.fixdamage ? critical(this, wcat, kind === 'ranged') : null, pct = ld?.damage || 100;
+    // Assassinate's second stage uses its own prop + criticalDamage (with Sharp Eyes stacked on top)
     if (opts.stage2) {
       const se = this.buffs?.find((b) => b.sharpEyes && b.until > Date.now())?.sharpEyes;
-      crit = { rate: (ld?.prop || 0) + (se?.rate || 0), dmg: (ld?.criticalDamage || 100) - 100 + (se?.dmg || 0) };
+      const seDmg = se ? (se.dmg > 100 ? se.dmg - 100 : se.dmg) : 0;
+      crit = {
+        rate: Math.min(100, (crit?.rate || 0) + (ld?.prop || 0)),
+        dmg: Math.max(crit?.dmg || 120, (ld?.criticalDamage || 100) + seDmg),
+      };
     }
     // the weapon's info/knockback: the chance a swing (not a shot) recoils the monster strongly, more with Power
     // Knock-Back; Dragon's Breath throws back what it strikes at its prop chance
@@ -7039,10 +7113,10 @@ export class Game {
         if (kind === 'magic' && !ld?.fixdamage && guarded(m)) { dmg.push(0); crits.push(false); continue; }
         if (kind === 'magic' && !ld?.fixdamage && immuneTo(m, MAGIC_IMMUNE)) { dmg.push(1); crits.push(false); continue; }
         if (kind === 'magic' && !ld?.fixdamage && m.status?.second & HARD_SKIN) { dmg.push(0); crits.push(false); continue; }
-        const c = skillId === SNIPE || (!!crit && Math.random() * 100 < crit.rate);
+        const c = skillId === SNIPE || (!!crit && crit.dmg > 100 && Math.random() * 100 < Math.min(100, crit.rate));
         let d = roll();
         if (kind === 'magic' && !ld?.fixdamage && takenPct(m)) d = Math.trunc((d * (takenPct(m) + 100)) / 100);
-        dmg.push(c && skillId !== SNIPE ? Math.round((d * (pct + crit.dmg)) / pct) : d); crits.push(c);
+        dmg.push(c && skillId !== SNIPE ? Math.min(199999, Math.max(1, Math.round((d * crit.dmg) / 100))) : d); crits.push(c);
       }
       const scale = skillId === ARROW_BOMB ? (ld?.x || 100) / 100 : PIERCE_SCALE[skillId] ? PIERCE_SCALE[skillId] ** place : 1;
       if (scale !== 1) for (let i = 0; i < dmg.length; i++) dmg[i] = Math.trunc(dmg[i] * scale);
@@ -8136,36 +8210,119 @@ export class Game {
     if (p.fh) p.y = Footholds.yAt(p.fh, p.x);
     if (tell) this.net?.cancelChair(-1);
   }
-  /** Item/Install/0301.img/<id>/effect: the chair's picture (loaded once per chair). */
+  /** Item/Install/0301.img/<id>: effect/effect2/effect3/randEffect1, Effect/ItemEff.img, and Character/TamingMob (tamingMob). */
   chairArt(id) {
     this.chairs ??= new Map();
     if (!this.chairs.has(id)) {
       this.chairs.set(id, null);
       this.assets.json('Item/Install/0301.img').then(async (img) => {
-        const node = img?.[pad(id, 8)]?.effect;
-        if (!node) return;
-        const anim = new Anim(node, true);
-        await this.assets.preload(anim.frames);
-        this.chairs.set(id, anim);
+        const ch = img?.[pad(id, 8)];
+        if (!ch) return;
+        const tmRaw = ch.info?.tamingMob;
+        const tamingMob = tmRaw && typeof tmRaw === 'object'
+          ? (Number(tmRaw[0] ?? Object.values(tmRaw)[0]) || 0)
+          : (Number(tmRaw) || 0);
+        if (tamingMob) this.mountData(tamingMob);
+
+        const specs = [
+          [ch.effect, -1],
+          [ch.effect2, 1],
+          [ch.effect3, 2],
+        ].filter(([n]) => n);
+        if (!specs.length && ch.randEffect1) specs.push([ch.randEffect1, -1]);
+
+        const back = [], front = [], toLoad = [];
+        let maxArea = 0;
+        for (const [node, defZ] of specs) {
+          const anim = new Anim(node, true);
+          if (!anim.frames.length) continue;
+          for (const f of anim.frames) maxArea = Math.max(maxArea, (f._w || 0) * (f._h || 0));
+          toLoad.push(...anim.frames);
+          const z = node.z !== undefined ? Number(node.z) : defZ;
+          const pos = node.pos !== undefined ? Number(node.pos) : null;
+          (z > 0 ? front : back).push({ anim, z, pos });
+        }
+
+        // Group/ItemEff chairs (Fox God, Komainu, Kitsune Torii, 03016xxx, etc.) store full art in Effect/ItemEff.img/<id>
+        if (maxArea <= 400) {
+          const ie = await this.assets.json('Effect/ItemEff.img');
+          const ieNode = ie?.[String(Number(id))] || ie?.[pad(id, 8)];
+          if (ieNode && typeof ieNode === 'object') {
+            const pickLayer = (container) => {
+              const keys = Object.keys(container).filter((k) => /^\d+$/.test(k)).sort((a, b) => Number(a) - Number(b));
+              for (const k of keys) {
+                const entry = container[k];
+                if (!entry || typeof entry !== 'object') continue;
+                const a0 = new Anim(entry, true);
+                if (a0.frames.some((f) => (f._w || 0) * (f._h || 0) > 16)) {
+                  return [{ anim: a0, z: entry.z !== undefined ? Number(entry.z) : (container.z !== undefined ? Number(container.z) : -1), pos: 0 }];
+                }
+                const subKeys = Object.keys(entry).filter((sk) => /^\d+$/.test(sk)).sort((a, b) => Number(a) - Number(b));
+                const subs = [];
+                for (const sk of subKeys) {
+                  const sn = entry[sk];
+                  if (!sn || typeof sn !== 'object') continue;
+                  const sa = new Anim(sn, true);
+                  if (sa.frames.some((f) => (f._w || 0) * (f._h || 0) > 16)) {
+                    subs.push({ anim: sa, z: sn.z !== undefined ? Number(sn.z) : -1, pos: 0 });
+                  }
+                }
+                if (subs.length) return subs;
+              }
+              return [];
+            };
+            const ieLayers = pickLayer(ieNode);
+            for (const il of ieLayers) {
+              toLoad.push(...il.anim.frames);
+              (il.z > 0 ? front : back).push(il);
+            }
+          }
+        }
+
+        if (!toLoad.length && !tamingMob) return;
+        if (toLoad.length) await this.assets.preload(toLoad);
+        back.sort((a, b) => a.z - b.z);
+        front.sort((a, b) => a.z - b.z);
+        const rel = Array.isArray(ch.info?.bodyRelMove) ? [Number(ch.info.bodyRelMove[0]) || 0, Number(ch.info.bodyRelMove[1]) || 0] : null;
+        this.chairs.set(id, {
+          back,
+          front,
+          rel,
+          tamingMob,
+          sitAction: typeof ch.info?.sitAction === 'string' ? ch.info.sitAction : null,
+          sitLeft: !!Number(ch.info?.sitLeft),
+          removeBody: !!Number(ch.info?.removeBody),
+        });
       });
     }
     return this.chairs.get(id);
   }
-  /**
-   * The chair behind its sitter, flipped with them. Its art is anchored with its bottom on their feet (openms's
-   * reading: the canvas's height less its origin lifts every chair onto the floor; not a recovered rule).
-   */
-  drawChair(ctx, id, sx, sy, facingRight) {
-    const anim = this.chairArt(id);
+  /** Draw a chair layer anchored for v83 (pos=1 / legacy oy<=0) and v232 (bodyRelMove / sitAction / pos). */
+  drawChairLayer(ctx, layer, ch, sx, sy, cby, facingRight) {
+    const anim = layer?.anim;
     if (!anim?.frames.length) return;
     const total = anim.frames.reduce((t, f) => t + (f.delay || 100), 0);
     let t = performance.now() % total, n = anim.frames[0];
     for (const f of anim.frames) { if (t < (f.delay || 100)) { n = f; break; } t -= f.delay || 100; }
     const img = this.assets.image(n);
     if (!img) return;
-    const ox = n.origin?.[0] || 0, top = Math.round(sy - img.height);
+    const ox = n.origin?.[0] || 0, oy = n.origin?.[1] ?? 0;
+    let top;
+    if (ch.sitAction || layer.pos === 0 || layer.pos === 3) {
+      top = Math.round(sy - oy);
+    } else if (layer.pos === 1) {
+      top = Math.round(sy + cby - 52 - oy);
+    } else {
+      top = (ch.rel || oy > 0) ? Math.round(sy + cby - oy) : Math.round(sy - img.height);
+    }
     if (!facingRight) { ctx.drawImage(img, Math.round(sx - ox), top); return; }
     ctx.save(); ctx.translate(Math.round(sx + ox), top); ctx.scale(-1, 1); ctx.drawImage(img, 0, 0); ctx.restore();
+  }
+  drawChair(ctx, id, sx, sy, cby, facingRight, side = 'back') {
+    const ch = this.chairArt(id);
+    if (!ch) return;
+    const list = side === 'front' ? ch.front : ch.back;
+    for (const l of list) this.drawChairLayer(ctx, l, ch, sx, sy, cby, facingRight);
   }
 
   /**
@@ -8387,6 +8544,7 @@ export class Game {
     const wdef = eq('wdef') - (shield?.wdef || 0) + Math.trunc(((shield?.wdef || 0) * shieldMastery) / 100);
     const blessing = (k) => this.passive(this.blessingId(), k), int = this.totalStat('int');
     const { speed, jump } = this.statSpeedJump(), f = (k) => this.forced(k);
+    const crit = criticalBreakdown(this, Math.floor(this.weaponId() / 10000), true);
     return {
       attack: this.statAttack(),
       wdef: [cap(f('wdef') || wdef, 1999), this.buffValue('wdef')],
@@ -8396,6 +8554,9 @@ export class Game {
       avoid: [cap(this.avoidability(), 999), this.buffValue('avoid')],
       hands: [this.totalStat('dex') + this.totalStat('luk') + int + eq('hands'), this.buffValue('hands')],
       speed, jump,
+      critRate: [crit.unbuffedRate, crit.buffRate],
+      critDmg: [crit.unbuffedDmg, crit.buffDmg],
+      critInfo: crit,
     };
   }
   /** Morph/<id>.img/info: speed (80-140), jump (up to 123), superman and hide; null until loaded. */
@@ -8590,12 +8751,16 @@ export class Game {
     d = pct ? (base * pct) / 100 : base;
     const combo = this.comboPercent(skillId);
     if (combo > 0) d = (d * combo) / 100;
-    // a critical: Critical Shot / Throw, Sharp Eyes, and Stun Mastery on a stunned monster (+its prop and damage)
-    let rate = crit?.rate || 0, extra = crit ? crit.dmg + 100 : 0;
+    // Critical hits: base + job + weapon crit passives + Sharp Eyes + Aran Combo Critical + Stun Mastery
+    let rate = crit?.rate || 0, critDmg = crit?.dmg || 0;
     const stun = this.skills.level(STUN_MASTERY) && (m.status?.second & 0x80) && this.skills.levelData(STUN_MASTERY);
-    if (stun) { rate += Math.max(0, Math.min(100, stun.prop || 0)); extra += stun.damage || 0; }
-    const c = rate > 0 && extra > 0 && skillId !== BLIZZARD && Math.random() * 100 < rate;
-    if (c) d += ((extra - 100) * base) / 100;
+    if (stun) {
+      rate += Math.max(0, Math.min(100, stun.prop || 0));
+      critDmg += Math.max(0, Math.round(((stun.damage || 100) - 100) * 0.5));
+    }
+    rate = Math.min(100, Math.max(0, rate));
+    const c = rate > 0 && critDmg > 100 && Math.random() * 100 < rate;
+    if (c) d = (d * critDmg) / 100;
     // Assassinate: x(seconds in Dark Sight, up to its time, / 3 + 1)
     if (skillId === ASSASSINATE) d *= Math.floor(Math.min(this.assassinSec || 0, ld?.time || 0) / 3) + 1;
     // Wind Walk and Vanish (out of Dark Sight) strike harder
@@ -9359,7 +9524,10 @@ export class Game {
 
   /** Your hits in red (NoRed), other players' in blue (NoBlue); your hits also show the monster's HP bar. */
   damageNumbers(target, dmgs, mine, skillId = 0, crits = [], weaponId = 0, scale = 1) {
-    if (mine && target.kind === 'Mob') target.hpShownUntil = performance.now() + 5000;
+    if (mine && target.kind === 'Mob') {
+      target.hpShownUntil = performance.now() + 5000;
+      this.widgets?.recordDamage(dmgs, crits);
+    }
     // a monster's numbers are red (crit art on a crit) whoever struck it; blue is only for one being healed
     this.vfx?.damage(target, dmgs, target.kind === 'Mob' || mine ? 'red' : 'blue', skillId, crits, weaponId, scale);
   }
@@ -10662,34 +10830,49 @@ export class Game {
     const gx = ghost ? ghost.x - ent.x : 0, gy = ghost ? ghost.y - ent.y : 0;
     const sx = ent.x + gx - cam.x, sy = ent.y + gy - cam.y;
     const chair = local ? ent.seat?.item : ent.action === 'sit' && ent.chair;
-    if (chair) this.drawChair(ctx, chair, sx, sy, ent.facingRight);
+    const chairInfo = chair ? this.chairArt(chair) : null;
+    const chairMount = !mount && ent.action !== 'dead' && chairInfo?.tamingMob ? this.mountData(chairInfo.tamingMob)?.img : null;
+    const chairRight = chairInfo?.sitLeft ? false : ent.facingRight;
+    const cbx = !chairMount && chairInfo?.rel ? (chairRight ? -chairInfo.rel[0] : chairInfo.rel[0]) : 0;
+    const cby = !chairMount && chairInfo?.rel ? chairInfo.rel[1] : 0;
+    if (chairMount) {
+      if (ent.chairTmId !== chair) { ent.chairTmId = chair; ent.chairT0 = performance.now(); }
+      parts = composeMounted(look, chairMount, chairInfo.tamingMob, 'sit', ent.expr, performance.now() - ent.chairT0);
+    } else if (chairInfo?.sitAction) {
+      parts = look.compose(chairInfo.sitAction, ent.frame, ent.expr);
+    }
+    const rdx = (chairRight ? -(parts.riderDx || 0) : (parts.riderDx || 0));
+    const rdy = parts.riderDy || 0;
+    const fxDx = gx + cbx + rdx, fxDy = gy + cby + rdy;
+    const tagX = snapPx(sx + cbx + rdx), tagY = snapPx(sy + cby + rdy) + 4;
+    if (chair) this.drawChair(ctx, chair, sx, sy, cby, chairRight, 'back');
     // while protected after a hit, alternate gray and normal every 60ms, as the original does (never a ghost)
     const blink = local && !dead && this.invincible > 0 && !this.missed && Math.floor(this.invincible / 0.06) % 2 === 0;
     if (performance.now() < ((local ? this.boomerangUntil : ent.boomerangUntil) || 0)) return;   // gone mid Boomerang Step
     // morphed: only the morph's frame (no body, equipment or their effects); its character effect stays
     const morphed = !mount && ent.morphView?.node();
     if (morphed) {
-      this.drawSetFx(ctx, cam, ent, false, gx, gy);
-      this.drawItemFx(ctx, cam, ent, parts, false, gx, gy);
+      this.drawSetFx(ctx, cam, ent, false, fxDx, fxDy);
+      this.drawItemFx(ctx, cam, ent, parts, false, fxDx, fxDy);
       if (blink) { ctx.save(); ctx.filter = 'brightness(0.502)'; }
       ent.morphView.draw(ctx, this.assets, sx, sy, drawnRight(ent), (local ? this.hidden() || this.gmHidden : ent.hidden) ? 0.5 : 1);
       if (blink) ctx.restore();
-      this.drawItemFx(ctx, cam, ent, parts, true, gx, gy);
-      this.drawSetFx(ctx, cam, ent, true, gx, gy);
+      this.drawItemFx(ctx, cam, ent, parts, true, fxDx, fxDy);
+      this.drawSetFx(ctx, cam, ent, true, fxDx, fxDy);
       if (ent.box?.type === 4) this.boards.drawShopBoard(ctx, this.cam, ent, sx, sy);
       else if (ent.box?.type === 1 || ent.box?.type === 2) this.boards.drawGameBoard(ctx, this.cam, ent, sx, sy);
       if (ent.chalk) this.drawChalkboard(ctx, ent, sx, sy); else ent.chalkRect = null;
-      this.drawCharTags(ctx, ent, look, local, snapPx(sx), snapPx(sy) + 4);
+      this.drawCharTags(ctx, ent, look, local, tagX, tagY);
       return;
     }
-    this.drawSetFx(ctx, cam, ent, false, gx, gy);
-    this.drawItemFx(ctx, cam, ent, parts, false, gx, gy);
-    this.drawEquipFx(ctx, cam, ent, parts, false, gx, gy);
+    this.drawSetFx(ctx, cam, ent, false, fxDx, fxDy);
+    this.drawItemFx(ctx, cam, ent, parts, false, fxDx, fxDy);
+    this.drawEquipFx(ctx, cam, ent, parts, false, fxDx, fxDy);
     this.drawUnderFx(ctx, cam, ent);
     if (blink) { ctx.save(); ctx.filter = 'brightness(0.502)'; }   // the client tints to 0x808080, not grey
     const seeThrough = local ? this.hidden() || this.gmHidden : ent.hidden;   // Dark Sight / Wind Walk / GM hide: half alpha
     if (!dead && (local ? this.partner() : ent.partner)) this.drawPartner(ctx, ent, sx, sy, local);
-    const mirror = drawnRight(ent);
+    const mirror = chairInfo?.sitLeft ? false : drawnRight(ent);
     // a frame whose image isn't made yet (its art still loading, or this frame's time for making them used up) doesn't
     // go up half-drawn: the last frame of theirs that was whole stays until it is
     // (they keep that frame's image themselves: it may be let go from the kept ones meanwhile, and nobody is ever to
@@ -10700,18 +10883,21 @@ export class Game {
       if (made === 'made') holdFrame(ent, parts);
       else if (made !== 'no' && ent.wholeSprite) { whole = ent.wholeParts; held = ent.wholeSprite; }
     }
-    drawParts(ctx, this.assets, whole, sx, sy, mirror, (seeThrough ? 0.5 : 1) * (ghost?.alpha ?? 1), !dead, held);
+    if (!chairInfo?.removeBody) {
+      drawParts(ctx, this.assets, whole, sx + cbx, sy + cby, mirror, (seeThrough ? 0.5 : 1) * (ghost?.alpha ?? 1), !dead, held);
+    }
+    if (chair) this.drawChair(ctx, chair, sx, sy, cby, chairRight, 'front');
     if (blink) ctx.restore();
-    this.drawItemFx(ctx, cam, ent, parts, true, gx, gy);
-    this.drawEquipFx(ctx, cam, ent, parts, true, gx, gy);
-    this.drawSetFx(ctx, cam, ent, true, gx, gy);
+    this.drawItemFx(ctx, cam, ent, parts, true, fxDx, fxDy);
+    this.drawEquipFx(ctx, cam, ent, parts, true, fxDx, fxDy);
+    this.drawSetFx(ctx, cam, ent, true, fxDx, fxDy);
     this.drawRingFx(ctx, cam, ent);
     // a shop's sign: a booth around its owner (in front of them) or a board over the head; name tags on top
     if (ent.box?.type === 4) this.boards.drawShopBoard(ctx, this.cam, ent, sx, sy);
     else if (ent.box?.type === 1 || ent.box?.type === 2) this.boards.drawGameBoard(ctx, this.cam, ent, sx, sy);
     if (ent.chalk) this.drawChalkboard(ctx, ent, sx, sy); else ent.chalkRect = null;
     if (!dead) this.drawCombo(ctx, ent, sx, sy, local ? this.comboValue() : ent.combo || 0);
-    this.drawCharTags(ctx, ent, look, local, snapPx(sx), snapPx(sy) + 4);
+    this.drawCharTags(ctx, ent, look, local, tagX, tagY);
   }
 
 
@@ -10723,6 +10909,7 @@ export class Game {
       if (!img) continue;
       const x = d.cx, y = d.landed && !d.pickedBy ? Math.trunc(d.y + 3 * Math.sin(d.phase)) : d.cy;
       if (!this.inView(x, y, 80, 100, 60)) continue;
+      this.widgets?.drawLootBeam(ctx, cam, d, x, d.y);
       // icons hang from their left edge (origin x ~0), so centre them on the spot they lie on
       const oy = node.origin?.[1] ?? img.height;
       ctx.globalAlpha = d.alpha;

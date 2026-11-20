@@ -9,9 +9,11 @@ services:
     container_name: voyage-client
     # uid 1000, so conf/client.conf is yours, not root's; ./conf must be writable by it
     user: "1000:1000"
-    # host networking so the container reaches the game server on the LAN
-    # (8484 login, 7575-7699 channels) and binds Server.Port directly
-    network_mode: host
+    # Publish Server.Port to the host (works on Windows/macOS Docker Desktop without host networking)
+    ports:
+      - "3000:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       # The assets folder the extractor made (JSON + PNG), shared with Voyage-Server and Voyage-Editor; its customs
       # folder is served in front of it. 5.6G, kept out of the image.

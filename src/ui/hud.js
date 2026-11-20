@@ -24,6 +24,7 @@ export class Hud {
       // window hotkeys (I, S, K, Q, M...) come from the server keymap via Game.handleHotkeys
       if (e.key === 'Enter') { e.preventDefault(); game.statusBar?.focusChat(); }
       else if (e.key === 'Escape') this.closeWindows();
+      else if (e.key === 'F9' && !e.repeat && !game.bindingOf?.(67)) { e.preventDefault(); game.widgets?.openDropWiki(); }
     });
   }
 
@@ -142,6 +143,7 @@ export class Hud {
     } else if (s.type === 'text') {
       if (s.text === 'You cannot acquire any items.') red(s.text); else this.gain(s.text);
     } else if (s.type === 'fame') grey(s.amount < 0 ? `You have lost fame (${s.amount})` : `You have gained fame. (+${s.amount})`);
+    else if (s.type === 'nx') this.gain(`You have gained NX (+${s.amount})`, '#7ee8fa');
     else if (s.type === 'gp') grey(s.amount < 0 ? `You have lost Guild Points (${s.amount})` : `You have earned Guild Points (+${s.amount})`);
     else if (s.type === 'itemMsg') { const d = await itemDesc(this.assets, s.id); if (d) grey(d); }
     else if (s.type === 'expired' || s.type === 'sealExpired' || s.type === 'timeLimit') {

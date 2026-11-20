@@ -234,25 +234,79 @@ export class SkillBook {
  * from yourself or a party member. A critical hit does (skill damage% + extra)% instead of the skill's damage%.
  */
 const CRIT_SKILLS = { 145: [3000001, 13000000], 146: [3000001, 13000000], 147: [4100001, 14100001], 148: [15110000] };
-export function critical(game, weaponCat, shot = true) {
-  const sb = game.skills;
-  let rate = 0, dmg = 0;
-  // Critical Shot and Critical Throw only count for a shot (the Explorer's, or a Cygnus job's own); Critical Punch for
-  // any knuckle blow. Whoever has a level in it gets it, whatever their job.
+
+/** Job advancement tier (0 = starter, 1..4 = 1st..4th job / Evan stages), mirroring Character.getJobAdvancementTier. */
+export function jobAdvancementTier(job = 0) {
+  if (!job || job === 1000 || job === 2000 || job === 2001) return 0;
+  if (job >= 2200 && job <= 2218) {
+    if (job >= 2216) return 4;
+    if (job >= 2213) return 3;
+    if (job >= 2210) return 2;
+    return 1;
+  }
+  const mod = job % 100;
+  if (mod < 10) return 1;
+  const sub = job % 10;
+  if (sub === 0) return 2;
+  if (sub === 1) return 3;
+  return 4;
+}
+
+const JOB_TIER_CRIT = [
+  [0, 0],   // starter
+  [0, 0],   // 1st job
+  [5, 5],   // 2nd job
+  [10, 15], // 3rd job
+  [15, 25], // 4th job
+];
+
+/**
+ * Full breakdown of the character's Critical Rate (%) and Critical Damage (% multiplier, base 120%).
+ * All classes and skills share a universal 5% / 120% baseline plus job advancement precision, weapon crit passives,
+ * Sharp Eyes, and Aran's Combo Critical.
+ */
+export function criticalBreakdown(game, weaponCat, shot = true) {
+  const sb = game.skills, tier = jobAdvancementTier(game.stats?.job || 0);
+  const [jobRate, jobDmg] = JOB_TIER_CRIT[tier] || [0, 0];
+  const baseRate = 5, baseDmg = 120;
+
+  let passiveRate = 0, passiveDmg = 0;
   const list = CRIT_SKILLS[weaponCat], cygnus = Math.floor((game.stats?.job || 0) / 1000) === 1;
-  const id = (shot || weaponCat === 148) && (list?.[cygnus ? 1 : 0] ?? list?.[0]);   // knuckles: Critical Punch for all
-  const ld = id && sb.level(id) && sb.levelData(id);
-  if (ld) { rate += ld.prop || 0; dmg += (ld.damage || 100) - 100; }
+  const id = (shot || weaponCat === 148) && (list?.[cygnus ? 1 : 0] ?? list?.[0]);
+  const ld = id && sb?.level?.(id) && sb.levelData(id);
+  if (ld) {
+    passiveRate += Number(ld.prop) || 0;
+    passiveDmg += Math.max(0, Math.round(((Number(ld.damage) || 100) - 100) * 0.5));
+  }
+
+  let buffRate = 0, buffDmg = 0;
   const se = game.buffs?.find((b) => b.sharpEyes && b.until > Date.now())?.sharpEyes;
-  if (se) { rate += se.rate; dmg += se.dmg; }
-  // Combo Critical (Aran) with a combo going: n = combo / 10, at most its x; +(y x n + 10)% chance (0-100), and
-  // 100 + damage x n points more
-  const combo = game.aranCombo || 0, cc = combo > 0 && sb.level(21110000) && sb.levelData(21110000);
+  if (se) {
+    buffRate += Number(se.rate) || 0;
+    const raw = Number(se.dmg) || 0;
+    buffDmg += raw > 100 ? raw - 100 : raw;
+  }
+
+  const combo = game.aranCombo || 0, cc = combo > 0 && sb?.level?.(21110000) && sb.levelData(21110000);
   if (cc) {
     const n = Math.min(Number(cc.x) || 0, Math.floor(combo / 10));
-    rate += Math.max(0, Math.min(100, (Number(cc.y) || 0) * n + 10));
-    dmg += 100 + (Number(cc.damage) || 0) * n;
+    buffRate += Math.max(0, Math.min(100, (Number(cc.y) || 0) * n + 10));
+    buffDmg += Math.max(0, Math.round((Number(cc.damage) || 0) * n * 0.5));
   }
+
+  const unbuffedRate = Math.min(100, baseRate + jobRate + passiveRate);
+  const rate = Math.min(100, unbuffedRate + buffRate);
+  const unbuffedDmg = baseDmg + jobDmg + passiveDmg;
+  const dmg = unbuffedDmg + buffDmg;
+  return {
+    baseRate, jobRate, passiveRate, buffRate: Math.max(0, rate - unbuffedRate), unbuffedRate, rate,
+    baseDmg, jobDmg, passiveDmg, buffDmg, unbuffedDmg, dmg,
+  };
+}
+
+/** Critical chance (%) and critical damage multiplier (%) for an attack. */
+export function critical(game, weaponCat, shot = true) {
+  const { rate, dmg } = criticalBreakdown(game, weaponCat, shot);
   return rate > 0 ? { rate, dmg } : null;
 }
 
