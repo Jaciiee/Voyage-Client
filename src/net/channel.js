@@ -457,7 +457,6 @@ export class ChannelSession {
         else if (sub === 0xFE) this.emit('status', { type: 'text', text: 'This item is unavailable for the pick-up.' });
         else if (sub === 0xFD) this.emit('status', { type: 'text', text: 'You cannot acquire any items.' });
         else this.emit('status', { type: 'text', text: "You can't get anymore items." });
-        this.emit('pickupAnswered');
       } else if (mode === 4) this.emit('status', { type: 'fame', amount: r.int() });
       else if (mode === 5) this.emit('status', { type: 'meso', amount: r.int(), inChat: true });
       else if (mode === 6) this.emit('status', { type: 'gp', amount: r.int() });
@@ -930,6 +929,9 @@ export class ChannelSession {
         let partner = null, look = null;
         if (me === 1) { r.ubyte(); look = readCharLook(r); partner = r.string(); }
         this.emit('tradeOpen', { slot: me, partner, look });
+      } else if (op === 3) {                              // an invitation's answer: 1 not found, 2 busy, 3 declined, 4 not accepting
+        const code = r.ubyte();
+        this.emit('inviteReply', code, code >= 2 && code <= 4 && r.available >= 2 ? r.string() : '');
       } else if (op === 2) {                              // INVITE
         const type = r.ubyte();   // 3 a trade, 6 a cash item trade
         if (type === 3 || type === 6) { const name = r.string(); this.emit('tradeInvite', name, r.available >= 4 ? r.int() : 0, type === 6); }
@@ -1703,6 +1705,10 @@ export class ChannelSession {
       if (t === 5) { this.emit('bossHp', { oid: r.int(), hp: r.int(), maxHp: r.int(), tag: r.ubyte(), bg: r.ubyte() }); return; }
       // 2: a named map object plays its current state again (state -1)
       if (t === 2) { this.emit('objectStates', [{ name: r.string(), state: -1 }]); return; }
+      // 0: a summon effect (n, x, y); 1: the screen trembles (heavy, delay ms); 7: three numbers (the miro boards)
+      if (t === 0) { this.emit('fieldEffect', t, '', { n: r.ubyte(), x: r.int(), y: r.int() }); return; }
+      if (t === 1) { this.emit('fieldEffect', t, '', { heavy: r.ubyte() !== 0, delay: r.int() }); return; }
+      if (t === 7) { this.emit('fieldEffect', t, '', { a: r.int(), b: r.int(), c: r.int() }); return; }
       this.emit('fieldEffect', t, r.available ? r.string() : '');
     });
     // map objects by tag: a count, then each tag and 1 to show / 0 to hide
@@ -2015,6 +2021,8 @@ export class ChannelSession {
     if (op === 0x19) { const mesos = this.roomType === 5 ? r.int() : undefined; this.emit('shopItems', readShopItems(r), mesos); return true; }   // UPDATE_MERCHANT: (mesos) the stock
     if (op === 0x2A) { this.roomType = 0; this.emit('shopClosed', 0, r.available ? r.ubyte() : null); return true; }   // REAL_CLOSE_MERCHANT: closed, and what came back
     if (op === 0x1A) { this.emit('shopSold', r.ubyte(), r.short(), r.string()); return true; } // UPDATE_PLAYERSHOP: sold (owner)
+    if (op === 0x18) { this.emit('shopBuyResult', r.ubyte()); return true; }                 // a purchase's failure, by code
+    if (op === 0x1B) { const count = r.ubyte(); this.emit('shopRowGone', count, r.short()); return true; }   // one row taken off
     // a Hired Merchant's owner: ORGANIZE's answer (its mesos, sold-out rows dropped), the mesos withdrawn, the visit list
     // (name, ms there) and the blacklist
     if (op === 0x28) { this.emit('shopOrganized', r.int()); return true; }
@@ -2073,9 +2081,11 @@ export class ChannelSession {
   pshopOpenStore() { this.send(new PacketWriter(C.PLAYER_INTERACTION).byte(0x0B).byte(1)); }
   pshopOpenCash(type, birthday) { this.send(new PacketWriter(C.PLAYER_INTERACTION).byte(0x0E).byte(0x0B).byte(type).int(birthday)); }
   /** ADD_ITEM: inventory tab, slot, how many bundles, how many in each, the price of one bundle */
-  pshopPut(tab, slot, bundles, perBundle, price) { this.send(new PacketWriter(C.PLAYER_INTERACTION).byte(0x16).byte(tab).short(slot).short(bundles).short(perBundle).int(price)); }
+  /** An item put up: 0x16 in a player shop, 0x21 in a Hired Merchant. */
+  pshopPut(tab, slot, bundles, perBundle, price, merchant = false) { this.send(new PacketWriter(C.PLAYER_INTERACTION).byte(merchant ? 0x21 : 0x16).byte(tab).short(slot).short(bundles).short(perBundle).int(price)); }
   pshopRemove(index) { this.send(new PacketWriter(C.PLAYER_INTERACTION).byte(0x1B).short(index)); }
-  pshopBuy(index, bundles) { this.send(new PacketWriter(C.PLAYER_INTERACTION).byte(0x17).byte(index).short(bundles)); }
+  /** A row bought: 0x17 in a player shop, 0x22 in a Hired Merchant, with the bundles and the item's check value. */
+  pshopBuy(index, bundles, merchant = false, check = 0) { this.send(new PacketWriter(C.PLAYER_INTERACTION).byte(merchant ? 0x22 : 0x17).byte(index).short(bundles).int(check)); }
   pshopExit() { this.roomType = 0; this.send(new PacketWriter(C.PLAYER_INTERACTION).byte(0x0A)); }
   // ---- your Hired Merchant: HIRED_MERCHANT_REQUEST asks whether one may open here (ENTRUSTED_SHOP_CHECK_RESULT answers);
   // in its room TAKE_ITEM_BACK 0x26, MERCHANT_ORGANIZE 0x28 (collect the mesos, drop sold-out rows), CLOSE_MERCHANT 0x29
@@ -2201,7 +2211,7 @@ export class ChannelSession {
   tradeConfirm() { this.send(new PacketWriter(C.PLAYER_INTERACTION).byte(0x11)); }
   tradeChat(text) { this.send(new PacketWriter(C.PLAYER_INTERACTION).byte(6).string(text)); }
   tradeExit() { this.send(new PacketWriter(C.PLAYER_INTERACTION).byte(0x0A)); }
-  charInfo(cid) { this.send(new PacketWriter(C.CHAR_INFO_REQUEST).int(Date.now() | 0).int(cid)); }
+  charInfo(cid) { this.send(new PacketWriter(C.CHAR_INFO_REQUEST).int(Date.now() | 0).int(cid).byte(0)); }
   /** GIVE_FAME: target char id + direction (0 drop, 1 raise). */
   giveFame(cid, mode) { this.send(new PacketWriter(C.GIVE_FAME).int(cid).byte(mode)); }
   /** GUILD_OPERATION: 2 create, 5 invite, 6 join, 7 leave, 8 expel, 0xD rank titles, 0xE rank, 0xF emblem, 0x10 notice, 0x1E agree */

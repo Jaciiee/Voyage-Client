@@ -20,6 +20,9 @@ const WHEEL_STEP = 100;
 
 const NO_DROP_WEDDING = new Set([1112803, 1112806, 1112807, 1112809, 4031481, 4031376, 4031480, 4031375, 4031373, 4031374, 3994085]);
 
+/** Bought only with NX Prepaid: name change, world transfer, 520000x, 549xxxx, 5221001, 5222000. */
+export const prepaidOnly = (id) => id === 5400000 || id === 5401000 || Math.floor(id / 10) === 520000 || Math.floor(id / 10000) === 549 || id === 5221001 || id === 5222000;
+
 export class WindowManager {
   constructor(game, statusBar) {
     this.game = game; this.assets = game.assets; this.bar = statusBar;
@@ -191,9 +194,12 @@ export class WindowManager {
     const o = n.origin || [im.width, im.height];
     ctx.drawImage(im, x + 32 - o[0], y + 32 - o[1]);
   }
-  /** CashShop.img/CashItem/0: the gold coin on a cash item's icon, hung from the icon's bottom-right corner. */
+  /**
+   * CashShop.img/CashItem/0: the gold coin on a cash item's icon, hung from the icon's bottom-right corner;
+   * PrepaidCashItem/0 instead on an item bought only with NX Prepaid (placed the same way).
+   */
   drawCashMark(ctx, id, x, y, scale = 1) {
-    const n = this.CS?.CashItem?.[0], im = n && this.isCash(id) && this.image(n);
+    const n = (prepaidOnly(id) ? this.CS?.PrepaidCashItem : this.CS?.CashItem)?.[0], im = n && this.isCash(id) && this.image(n);
     if (!im) return;
     const o = n.origin || [im.width, im.height];
     ctx.drawImage(im, Math.round(x - o[0] * scale), Math.round(y - o[1] * scale), im.width * scale, im.height * scale);
@@ -498,6 +504,7 @@ class InventoryWin extends Win {
   /** The coin button: drop 10 ~ 50,000 mesos (at most what you have); one request at a time, 200ms apart. */
   async dropMesos() {
     if (!this.g.handsFree(false)) return;
+    if (this.g.admin & 0x80) { this.mgr.notice("The Admin account can't throw away the money."); return; }
     const max = Math.min(50000, this.g.meso || 0);
     const v = await this.mgr.askNumber('How many will you drop? (A portion of the amount may be lost if picked up by another user.)', 10, 10, max);
     if (!(v >= 10) || !this.g.canExclusive(200)) return;
@@ -588,6 +595,13 @@ class InventoryWin extends Win {
     if (it) this.g.useInventoryItem(this.tab, slot, it);
   }
   drop(lx, ly, c) {
+    // a shop row the owner dragged here: taken back when this shows its tab (not when dead), otherwise its tab opens
+    if (c.kind === 'shoprow') {
+      if (this.g.dead) { this.mgr.notice("You can't do it once you're dead."); return; }
+      if (this.tab !== c.tab) { this.setTab(c.tab); return; }
+      this.g.playerShop?.takeBack(c.idx);
+      return;
+    }
     if (c.kind !== 'item') return;
     const to = this.slotAt(lx, ly) <= this.limit ? this.slotAt(lx, ly) : 0;
     // something you wear: into the cell it was dropped on; over another tab, the Equip tab opens with it still in hand
@@ -596,8 +610,7 @@ class InventoryWin extends Win {
       this.g.unequip(c.slot, to || 0);
       return;
     }
-    if (this.g.dead) { this.g.notice("You can't do it once you're dead."); return; }
-    if (c.tab === this.tab && to && to !== c.slot) this.g.net?.moveItem(this.tab, c.slot, to, this.g.inventory[this.tab][c.slot]?.quantity || 1);
+    if (c.tab === this.tab && to && to !== c.slot) this.g.moveSlot(this.tab, c.slot, to);
   }
   /** Dragged onto the field: dropped, after the client's checks and questions (see Game.dropItem). */
   dropOutside(c) { if (c.kind === 'item' && typeof c.tab === 'number') this.g.dropItem(c.tab, c.slot); }
