@@ -1,7 +1,8 @@
 import { Connection } from './connection.js';
 import { PacketWriter } from './packet.js';
 import { C, S, S_NAMES } from './opcodes.js';
-import { readCharacterInfo, readMarriage, readNewYearCard, readCharLook, writeCharLook, readRingLook, readItem, readMovement, writeMovement, isRechargeable } from './proto.js';
+import { config } from '../config.js';
+import { readCharacterInfo, readMarriage, readNewYearCard, readCharLook, writeCharLook, readRingLook, readItem, readMovement, writeMovement, isRechargeable, writeItemSlot } from './proto.js';
 
 /** CashShop item records (addCashItemInformation): cash id, account, item, SN, count, gift sender, expiry. */
 function readCashItem(r) {
@@ -12,6 +13,44 @@ function readCashItem(r) {
 }
 /** CASHSHOP_OPERATION results that carry a failure reason (each sits next to its action's success code). */
 const CS_FAILS = new Set([0x4C, 0x4E, 0x50, 0x56, 0x58, 0x5C, 0x5F, 0x61, 0x63, 0x65, 0x67, 0x69, 0x6B, 0x6D, 0x86, 0x88, 0x8A, 0x8C, 0x8E, 0x92, 0xA1]);
+/**
+ * An MTS listing: the item, its listing id, the price and the fee buyers pay on top (the list shows the two added),
+ * two strings the game keeps but doesn't show, the end date, the owner's name (own-listing checks), the name in the
+ * Seller column, a comment, the bid count and bid step (kept as shorts), the highest bid, an unused int, the buy-now
+ * price, another unused int, and the status (MY PAGE: 0 Sold, 1 Purchased, 2 Bid Lost, 3 Cancelled; for auctions
+ * 1 Exhibit, 2 Bid). A plain Cosmic server writes the fee before the price.
+ */
+function readMtsListing(r) {
+  const item = readItem(r, false), rec = { item, id: r.int(), price: r.int(), fee: r.int() };
+  r.string(); r.string();
+  rec.end = r.long(); rec.owner = r.string(); rec.seller = r.string(); rec.comment = r.string();
+  rec.bids = (r.int() << 16) >> 16; rec.step = (r.int() << 16) >> 16; rec.bid = r.int(); r.int(); rec.buyNow = r.int(); r.int();
+  rec.status = r.short();
+  if (config.cosmic) [rec.price, rec.fee] = [rec.fee, rec.price];
+  return rec;
+}
+/** MTS_OPERATION results: { mode, ...fields } (the fields each mode carries; most carry none or a reason code). */
+function readMtsResult(r) {
+  const e = { mode: r.ubyte() }, list = () => { const a = []; for (let n = r.int(); n > 0; n--) a.push(readMtsListing(r)); return a; };
+  switch (e.mode) {
+    case 0x15: case 0x17:   // a page of the list (0x15 also the sort state, then 1 when it answers a request)
+      e.total = r.int(); { const n = r.int(); e.tab = r.int(); e.type = r.int(); e.page = r.int();
+        if (e.mode === 0x15) { e.sortDir = r.ubyte(); e.sortCol = r.ubyte(); }
+        e.items = []; for (let i = 0; i < n; i++) e.items.push(readMtsListing(r)); }
+      e.answered = e.mode === 0x17 || (r.available > 0 && r.ubyte() !== 0);
+      break;
+    case 0x16: case 0x18: case 0x20: case 0x22: case 0x24: case 0x26: case 0x28: e.code = r.ubyte(); break;
+    case 0x1E: e.code = r.ubyte(); if (e.code === 0x48) e.limit = r.short(); break;
+    case 0x21:   // Transfer Inventory: the items, how many more there are than shown, then 1 when it answers a request
+      e.items = list(); e.hidden = r.available >= 4 ? r.int() : 0; e.answered = r.available > 0 && r.ubyte() !== 0; break;
+    case 0x23: case 0x2D: e.items = list(); break;   // Not Yet Sold; the wanted list's Buy List
+    case 0x27: e.invType = r.int(); e.slot = r.int(); break;   // a plain Cosmic server sends the quantity first
+    case 0x3D: e.nx = r.int(); e.listings = r.int(); break;   // the NX given back, then how many wanted requests ran out
+    case 0x3E: e.kind = r.ubyte(); e.itemId = r.int(); if (e.itemId > 0) { e.value = r.int(); e.time = r.long(); } break;
+    default: break;
+  }
+  return e;
+}
 /** A Commodity override from SET_CASH_SHOP: a flag mask, then each flagged field in this order. */
 const COMMODITY_FIELDS = [[0x1, 'ItemId', 'int'], [0x2, 'Count', 'short'], [0x10, 'Priority', 'ubyte'], [0x4, 'Price', 'int'],
   [0x8, 'Bonus', 'ubyte'], [0x20, 'Period', 'short'], [0x40, 'MaplePoint', 'int'], [0x80, 'Meso', 'int'], [0x100, 'Premium', 'ubyte'],
@@ -304,6 +343,18 @@ export class ChannelSession {
       } catch (e) { console.warn('SET_CASH_SHOP: short packet', e); }
       this.emit('cashShopOpen', d);
     });
+    // ---- the MTS: SET_ITC (character info, the account name, the listing fee in mesos, the buyers' fee (a percent
+    // and a flat NX amount), the shortest and longest auction in hours, the server's time), then its results
+    on(S.SET_ITC, (r) => {
+      const info = readCharacterInfo(r);
+      this.job = info.stats.job;
+      r.short();
+      const d = { info, account: r.string(), mesoFee: r.int(), pct: r.int(), flat: r.int(), minHours: r.int(), maxHours: r.int(), serverTime: r.long() };
+      this.emit('mtsOpen', d);
+    });
+    on(S.MTS_CHARGE_RESULT, () => this.emit('mtsCharge'));
+    on(S.MTS_OPERATION2, (r) => this.emit('mtsCash', r.int(), r.int()));   // NX, Maple Points
+    on(S.MTS_OPERATION, (r) => this.emit('mts', readMtsResult(r)));
     // MEMO_RESULT 3: notes waiting for you (gift notices and the like): id, sender, text, time, fame
     on(S.MEMO_RESULT, (r) => {
       const mode = r.ubyte();
@@ -410,7 +461,8 @@ export class ChannelSession {
       const stats = {};
       for (let bit = 1; bit <= 0x200000; bit *= 2) {
         if (!(mask & bit)) continue;
-        if (bit === 0x8 || bit === 0x80000 || bit === 0x100000) { r.long(); continue; } // pet uids
+        if (bit === 0x80000 || bit === 0x100000) continue;   // pets 2 and 3: read with pet 1, after hair
+        if (bit === 0x8) { for (const pet of [0x8, 0x80000, 0x100000]) if (mask & pet) r.long(); continue; }   // the pets' uids
         if (bit === 0x1) stats.skin = r.ubyte();
         else if (bit <= 0x4) stats[STAT_KEYS[bit]] = r.int();
         else if (bit < 0x20) stats[STAT_KEYS[bit]] = r.ubyte();
@@ -439,10 +491,13 @@ export class ChannelSession {
       else if (mode === 9) this.emit('notice', { type: 5, msg: r.string() });
       else if (mode === 3) {
         // EXP: white, amount, in chat (a quest's: a grey log line), then the bonuses shown with a monster's
+        // the every-3rd-monster bonus % comes with the hours hunted when it is on; in chat, the Spirit Week bonus %
+        // and, when that is on, how many quests still get event EXP
         const white = r.bool(), amount = r.int(), inChat = r.bool(), b = {};
         try {
-          b.event = r.int(); r.ubyte(); r.ubyte(); b.wedding = r.int();
-          if (inChat) r.ubyte();
+          b.event = r.int(); b.third = r.ubyte(); r.ubyte(); b.wedding = r.int();
+          if (b.third > 0) b.hours = r.ubyte();
+          if (inChat) { b.spirit = r.ubyte(); if (b.spirit) b.quests = r.ubyte(); }
           b.partyRate = r.ubyte(); b.party = r.int(); b.equip = r.int(); b.cafe = r.int(); b.rainbow = r.int();
         } catch { /* a shorter form: the amount alone */ }
         this.emit('status', { type: 'exp', amount, white, inChat, bonus: b });
@@ -489,7 +544,8 @@ export class ChannelSession {
         else if (type === 10) {
           n.lines = [n.msg];
           for (let k = r.ubyte(); k > 1; k--) n.lines.push(r.string());
-          n.channel = r.ubyte() + 1; r.skip(9); n.ear = r.bool();
+          // the channel, then the ear; a plain Cosmic server repeats the channel ten times, so its ear comes 9 later
+          n.channel = r.ubyte() + 1; if (r.available > 1) r.skip(9); n.ear = r.bool();
         }
       } catch { /* an older server's shorter form: the text alone */ }
       // a server with USE_DEBUG on reports every hit ("Hitted MOB 100100, OID 1234"): not for the chat log
@@ -700,30 +756,34 @@ export class ChannelSession {
     });
     // ---- buddy list (CWvsContext::OnFriendResult)
     const fixed = (r, n) => { const b = r.bytes(n); let s = ''; for (const c of b) { if (!c) break; s += String.fromCharCode(c); } return s; };
+    // a buddy's 39-byte record; flag 1: a request still waiting for an answer
+    const buddy = (r) => ({ id: r.int(), name: fixed(r, 13), pending: r.ubyte() === 1, channel: r.int(), group: fixed(r, 17) });
     on(S.BUDDYLIST, (r) => {
       const op = r.ubyte();
       if (op === 7 || op === 10 || op === 0x12) {
-        // flag 1: a request still waiting for an answer
+        // the records, then whether each one is in the Cash Shop
         const list = [];
-        for (let n = r.ubyte(); n > 0 && r.available >= 39; n--) {
-          const id = r.int(), name = fixed(r, 13), pending = r.ubyte() === 1;
-          const channel = r.int(), group = fixed(r, 17);
-          list.push({ id, name, channel, group, pending });
-        }
+        for (let n = r.ubyte(); n > 0 && r.available >= 39; n--) list.push(buddy(r));
+        for (const b of list) b.inShop = r.available >= 4 && r.int() !== 0;
         this.emit('buddies', list);
+      } else if (op === 8) {
+        // one buddy's record again, and whether it is in the Cash Shop
+        const id = r.int();
+        if (r.available < 40) return;
+        const entry = buddy(r);
+        entry.inShop = r.ubyte() !== 0;
+        this.emit('buddyUpdate', id, entry);
       } else if (op === 9) {
         // a request: who it's from, then their buddy record (the list keeps it as a pending entry) and an in-shop byte
         const id = r.int(), name = r.string();
         let entry = null;
-        if (r.available >= 40) {
-          entry = { id: r.int(), name: fixed(r, 13), pending: r.ubyte() === 1, channel: r.int(), group: fixed(r, 17) };
-          r.ubyte();
-        }
+        if (r.available >= 40) { entry = buddy(r); entry.inShop = r.ubyte() !== 0; }
         this.emit('buddyRequest', { id, name, entry });
       } else if (op === 0x14) {
-        const id = r.int(); r.ubyte();
-        this.emit('buddyChannel', id, r.int());
+        const id = r.int(), inShop = r.ubyte() !== 0;
+        this.emit('buddyChannel', id, r.int(), inShop);
       } else if (op === 0x15) this.emit('buddyCapacity', r.ubyte());
+      else if (op === 0x10 || op === 0x11 || op === 0x13 || op === 0x16) this.emit('buddyMessage', op, r.available && r.ubyte() ? r.string() : null);   // the server's reason, if it gives one
       else this.emit('buddyMessage', op);
     });
     // ---- party (CWvsContext::OnPartyResult)
@@ -778,7 +838,7 @@ export class ChannelSession {
     on(S.PARTY_OPERATION, (r) => {
       const op = r.ubyte();
       if (op === 8) this.emit('party', { kind: 'created', id: r.int() });
-      else if (op === 4) { const id = r.int(), name = r.string(); this.emit('partyInvite', { id, name, autoJoin: r.available ? r.ubyte() !== 0 : false }); }
+      else if (op === 4) { const id = r.int(), name = r.string(); this.emit('partyInvite', { id, name, autoJoin: r.available ? r.ubyte() : 0 }); }   // autoJoin: Party Search's byte, sent back as it came
       else if (op === 7 || op === 0x22) { const id = r.int(); this.emit('party', { kind: 'update', id, ...partyStatus(r) }); }
       else if (op === 0x0F) { const id = r.int(), name = r.string(); this.emit('party', { kind: 'join', id, name, ...partyStatus(r) }); }
       else if (op === 0x0C) {
@@ -914,6 +974,15 @@ export class ChannelSession {
     // what the shared VISIT / EXIT / CHAT ops mean (3 trade, 4 player shop)
     on(S.PLAYER_INTERACTION, (r) => {
       const op = r.ubyte();
+      // a cash trade's birthday step answered (0x0E, room type 6): 0 inviting (then the target), 4 invited (then the
+      // invitation and a flag, with a short and 8 bytes when it's set); not ok asks for the birthday again
+      if (op === 0x0E && r.b[r.pos + 1] === 6) {
+        const e = { action: r.ubyte(), type: r.ubyte(), ok: r.ubyte() !== 0 };
+        if (e.action === 0) e.value = r.int();
+        else if (e.action === 4) { e.value = r.int(); e.f = r.ubyte(); if (e.f) { e.s = r.short(); e.buf = r.bytes(8); } }
+        this.emit('cashTradeBirthday', e);
+        return;
+      }
       if ((this.roomType === 4 || this.roomType === 5) && this.shopOp(op, r)) return;
       if ((this.roomType === 1 || this.roomType === 2) && op !== 5 && op !== 3) { this.gameOp(op, r); return; }
       if (op === 5) {                                     // ROOM
@@ -923,12 +992,12 @@ export class ChannelSession {
         if (type === 1 || type === 2) { this.emit('gameRoom', readGameRoom(r, type)); return; }
         if (type === 4) { this.emit('shopOpen', readShopRoom(r)); return; }
         if (type === 5) { this.emit('shopOpen', readMerchantRoom(r, this.selfName)); return; }
-        if (type !== 3) return;
+        if (type !== 3 && type !== 6) return;   // 6 a cash trade
         r.ubyte();
         const me = r.ubyte();
         let partner = null, look = null;
         if (me === 1) { r.ubyte(); look = readCharLook(r); partner = r.string(); }
-        this.emit('tradeOpen', { slot: me, partner, look });
+        this.emit('tradeOpen', { slot: me, partner, look, cash: type === 6 });
       } else if (op === 3) {                              // an invitation's answer: 1 not found, 2 busy, 3 declined, 4 not accepting
         const code = r.ubyte();
         this.emit('inviteReply', code, code >= 2 && code <= 4 && r.available >= 2 ? r.string() : '');
@@ -981,6 +1050,8 @@ export class ChannelSession {
       const flag = r.ubyte();
       if (flag === 0x12) { this.emit('whisper', { from: r.string(), channel: r.ubyte(), gm: r.bool(), text: r.string() }); return; }
       if (flag === 0x0A) { this.emit('whisperResult', { to: r.string(), ok: r.bool() }); return; }
+      // the one you whispered had whispers off or you on their Blacklist (a plain Cosmic server never sends it)
+      if (flag === 0x22) { this.emit('whisperBlocked', { name: r.string(), notFound: r.bool() }); return; }
       if (flag === 0x09 || flag === 0x48) {
         const name = r.string(), type = r.ubyte(), where = r.int();
         this.emit('findResult', { name, type, where, buddy: flag === 0x48 });
@@ -1327,12 +1398,15 @@ export class ChannelSession {
     });
     // a summon struck: its owner, oid, the attack index (-2 and down: no monster), the damage, then the monster and
     // which way it was hit
-    on(S.DAMAGE_SUMMON, (r) => {
+    // (a plain Cosmic server, Server.Cosmic, sends these two the other way round: 0xB3 the damage, 0xB4 the pose by skill)
+    const summonDamageOp = config.cosmic ? S.SUMMON_SKILL : S.DAMAGE_SUMMON, summonPoseOp = config.cosmic ? S.DAMAGE_SUMMON : S.SUMMON_SKILL;
+    on(summonDamageOp, (r) => {
       const owner = r.int(), oid = r.int(), attack = r.byte(), damage = r.int();
       const mobId = attack > -2 && r.available >= 4 ? r.int() : 0, dir = mobId && r.available ? r.ubyte() : 0;
       this.emit('summonDamaged', owner, oid, damage, attack, mobId, dir);
     });
-    on(S.SUMMON_SKILL, (r) => this.emit('summonSkill', r.int(), r.int(), r.ubyte()));
+    // SUMMON_SKILL: a summon's pose - its owner, the summon's object id (plain Cosmic: its skill), the action (bit 7 its side)
+    on(summonPoseOp, (r) => this.emit('summonSkill', r.int(), r.int(), r.ubyte(), config.cosmic));
     // SHOW_SCROLL_EFFECT: who, success, cursed (the item was destroyed), Legendary Spirit, White Scroll
     // (success is signed: -1 "cannot use", 0 failed, else it worked)
     on(S.SHOW_SCROLL_EFFECT, (r) => this.emit('scrollEffect', { id: r.int(), success: r.byte(), cursed: r.bool(), legendary: r.bool(), white: r.bool() }));
@@ -1560,9 +1634,10 @@ export class ChannelSession {
     // The game server sends f != 1 in the direction byte; the client mirrors the art only when it is 0
     const readNpc = (r) => ({ oid: r.int(), id: r.int(), x: r.short(), y: r.short(), facingRight: !r.bool(), fh: r.short(), rx0: r.short(), rx1: r.short() });
     on(S.SPAWN_NPC, (r) => this.emit('spawnNpc', readNpc(r)));
+    // control of an NPC given (its whole entry follows, only used when we don't have the NPC yet) or taken back
     on(S.SPAWN_NPC_REQUEST_CONTROLLER, (r) => {
-      if (r.ubyte() === 0) { this.emit('removeNpc', r.int()); return; }
-      this.emit('spawnNpc', readNpc(r), true);   // one we control: it asks the server before it acts
+      if (r.ubyte() === 0) { this.emit('controlNpc', false, { oid: r.int() }); return; }
+      this.emit('controlNpc', true, readNpc(r));
     });
     on(S.REMOVE_NPC, (r) => this.emit('removeNpc', r.int()));
     // the map dresses you in its own clothes (what in, the map's type decides)
@@ -2163,7 +2238,8 @@ export class ChannelSession {
   messengerLeave() { this.send(new PacketWriter(C.MESSENGER).byte(2)); }
   messengerInvite(name) { this.send(new PacketWriter(C.MESSENGER).byte(3).string(name)); }
   /** A Messenger invitation turned down; one refused by the Game Option or the Blacklist adds your name and 1. */
-  messengerDecline(from, me = null) { const w = new PacketWriter(C.MESSENGER).byte(5).string(from); if (me !== null) w.string(me).byte(1); this.send(w); }
+  /** MESSENGER 5: who asked, your name, then 1 when turned down by itself (Game Option or Blacklist), 0 when you said no. */
+  messengerDecline(from, me, auto) { this.send(new PacketWriter(C.MESSENGER).byte(5).string(from).string(me).byte(auto ? 1 : 0)); }
   messengerChat(text) { this.send(new PacketWriter(C.MESSENGER).byte(6).string(text)); }
   merchantRequest() { this.send(new PacketWriter(C.HIRED_MERCHANT_REQUEST)); }
   /** The Owl of Minerva: OWL_ACTION (5 when its search opens), OWL_WARP (a store's owner and map), the Use-tab owl's search */
@@ -2208,7 +2284,30 @@ export class ChannelSession {
   tradeDecline(id = 0, reason = 3) { this.send(new PacketWriter(C.PLAYER_INTERACTION).byte(3).int(id).byte(reason)); }
   tradeItem(tab, pos, qty, slot) { this.send(new PacketWriter(C.PLAYER_INTERACTION).byte(0x0F).byte(tab).short(pos).short(qty).byte(slot)); }
   tradeMeso(v) { this.send(new PacketWriter(C.PLAYER_INTERACTION).byte(0x10).int(v)); }
-  tradeConfirm() { this.send(new PacketWriter(C.PLAYER_INTERACTION).byte(0x11)); }
+  /** TRADE (0x11), and the partner's confirmation answered (0x14): item ids, each with a checksum Voyage doesn't make (0). */
+  tradeConfirm(ids = []) { const w = new PacketWriter(C.PLAYER_INTERACTION).byte(0x11).byte(ids.length); for (const id of ids) w.int(id).int(0); this.send(w); }
+  tradeTransaction(ids = []) { const w = new PacketWriter(C.PLAYER_INTERACTION).byte(0x14).byte(ids.length); for (const id of ids) w.int(id).int(0); this.send(w); }
+  /**
+   * A cash trade: /CashTrade asks with the target alone (0x0E, 0, 6); the birthday follows when the server asks
+   * (0x0E, action, 6, birthday, then the target or the invitation); once it's right, the room (create 6) and the
+   * invitation, or the visit. The one invited answers with the birthday and the invitation (0x0E, 4, 6).
+   */
+  cashTradeAsk(cid) { this.send(new PacketWriter(C.PLAYER_INTERACTION).byte(0x0E).byte(0).byte(6).int(cid)); }
+  cashTradeBirthday(e, birthday) {
+    const w = new PacketWriter(C.PLAYER_INTERACTION).byte(0x0E).byte(e.action).byte(6).int(birthday).int(e.value);
+    if (e.action === 4) { w.byte(e.f || 0); if (e.f) w.short(e.s).bytes(e.buf); }
+    this.send(w);
+  }
+  cashTradeAccept(birthday, sn) { this.send(new PacketWriter(C.PLAYER_INTERACTION).byte(0x0E).byte(4).byte(6).int(birthday).int(sn).byte(0)); }
+  cashTradeStart(cid) {
+    this.send(new PacketWriter(C.PLAYER_INTERACTION).byte(0).byte(6).byte(0));
+    this.send(new PacketWriter(C.PLAYER_INTERACTION).byte(2).int(cid));
+  }
+  tradeVisit(sn, f = 0, sh = 0, buf = null) {
+    const w = new PacketWriter(C.PLAYER_INTERACTION).byte(4).int(sn).byte(0).byte(f);
+    if (f) w.short(sh).bytes(buf);
+    this.send(w);
+  }
   tradeChat(text) { this.send(new PacketWriter(C.PLAYER_INTERACTION).byte(6).string(text)); }
   tradeExit() { this.send(new PacketWriter(C.PLAYER_INTERACTION).byte(0x0A)); }
   charInfo(cid) { this.send(new PacketWriter(C.CHAR_INFO_REQUEST).int(Date.now() | 0).int(cid).byte(0)); }
@@ -2236,7 +2335,7 @@ export class ChannelSession {
   bbsReplyDelete(id, reply) { this.send(new PacketWriter(C.BBS_OPERATION).byte(5).int(id).int(reply)); }
   guildRank(cid, rank) { this.send(new PacketWriter(C.GUILD_OPERATION).byte(0x0E).int(cid).byte(rank)); }
   guildEmblem(e) { this.send(new PacketWriter(C.GUILD_OPERATION).byte(0x0F).short(e.bg).byte(e.bgColor).short(e.logo).byte(e.logoColor)); }
-  guildAgree(ok) { this.send(new PacketWriter(C.GUILD_OPERATION).byte(0x1E).int(0).byte(ok ? 1 : 0)); }
+  guildAgree(ok, charId) { this.send(new PacketWriter(C.GUILD_OPERATION).byte(0x1E).int(charId).byte(ok ? 1 : 0)); }
   /** ALLIANCE_OPERATION 4: take a guild alliance's invitation (its id, and the inviter's guild name). */
   allianceAccept(id, guildName = '') { this.send(new PacketWriter(C.ALLIANCE_OPERATION).byte(4).int(id).string(guildName)); }
   /**
@@ -2256,13 +2355,40 @@ export class ChannelSession {
   /** PARTY_SEARCH_START: level range, how many members, the job bits; PARTY_SEARCH_UPDATE ends the search */
   partySearchStart(min, max, members, jobs) { this.send(new PacketWriter(C.PARTY_SEARCH_START).int(min).int(max).int(members).int(jobs)); }
   partySearchStop() { this.send(new PacketWriter(C.PARTY_SEARCH_UPDATE)); }
-  partyDeny(name) { this.send(new PacketWriter(C.DENY_PARTY_REQUEST).byte(0).string(name)); }
+  /**
+   * DENY_PARTY_REQUEST: why, who asked, your name. 0x15 turned down by itself (Game Option or Blacklist), 0x16 with a
+   * party invitation already open, 0x17 you said no.
+   */
+  partyDeny(inviter, me, why) { this.send(new PacketWriter(C.DENY_PARTY_REQUEST).byte(why).string(inviter).string(me)); }
+  /** PARTY_OPERATION 3, joining a party you were invited to: 0 from the invitation, or Party Search's byte. */
+  partyJoin(partyId, b = 0) { this.send(new PacketWriter(C.PARTY_OPERATION).byte(3).int(partyId).byte(b)); }
   /** ITEM_PICKUP: field key, tick, where you stand, the drop, then a 0 checksum. */
   pickup(oid, pos) { this.send(new PacketWriter(C.ITEM_PICKUP).byte(0).int(Date.now() | 0).pos(pos).int(oid).int(0)); }
   /** The Cash Shop: entering is a bare ENTER_CASHSHOP, leaving a bare CHANGE_MAP (the server answers with a channel change) */
   enterCashShop() { this.send(new PacketWriter(C.ENTER_CASHSHOP).int(Date.now() | 0)); }
   enterMTS() { this.send(new PacketWriter(C.ENTER_MTS)); }
   leaveCashShop() { this.send(new PacketWriter(C.CHANGE_MAP)); }
+  /**
+   * MTS_OPERATION: 2 sell at a fixed price (item, slot, quantity, price, then 7 and 1); 0x12 auction (item, slot,
+   * quantity, starting bid, buy-now, hours, 1, bid increment); 3 sell to someone's wanted request (inventory type,
+   * slot, item, their listing); 4 ask for an item on WANTED (item id, price, quantity, two bytes, comment); 5 a list
+   * page (tab, type, page, two bytes, search by, search text); 6 search (tab, type, 0, by, text); then one listing id
+   * for 7 cancel a sale, 8 take an item home, 9 / 0x0A put in / take out of the Cart, 0x0B / 0x0D the Offers row's
+   * buttons, 0x0C buy from a Buy List, 0x10 buy, 0x11 buy from the Cart, 0x14 buy an auction item now; 0x13 bid
+   * (listing, highest bid, added).
+   */
+  mts(mode, fill) { const w = new PacketWriter(C.MTS_OPERATION).byte(mode); fill?.(w); this.send(w); }
+  mtsSell(item, slot, qty, price) { this.mts(2, (w) => writeItemSlot(w, item).int(slot).int(qty).int(price).byte(7).byte(1)); }
+  mtsAuction(item, slot, qty, start, buyNow, hours, step) { this.mts(0x12, (w) => writeItemSlot(w, item).int(slot).int(qty).int(start).int(buyNow).byte(hours).byte(1).int(step)); }
+  mtsSellWanted(invType, slot, item, id) { this.mts(3, (w) => writeItemSlot(w.byte(invType).int(slot), item).int(id)); }
+  mtsWanted(itemId, price, qty, comment) { this.mts(4, (w) => w.int(itemId).int(price).int(qty).byte(0).byte(1).string(comment)); }
+  mtsPage(tab, type, page, b1, b2, by, text) { this.mts(5, (w) => w.int(tab).int(type).int(page).byte(b1).byte(b2).int(by).string(text)); }
+  mtsSearch(tab, type, by, text) { this.mts(6, (w) => w.int(tab).int(type).int(0).int(by).string(text)); }
+  mtsListing(mode, id) { this.mts(mode, (w) => w.int(id)); }
+  mtsBid(id, base, added) { this.mts(0x13, (w) => w.int(id).int(base).int(added)); }
+  /** The MTS Charge and Check buttons (a plain Cosmic server answers an empty MTS_OPERATION with the balance). */
+  mtsCharge() { this.send(new PacketWriter(C.MTS_CHARGE)); }
+  mtsCheckCash() { this.send(new PacketWriter(config.cosmic ? C.MTS_OPERATION : C.MTS_CHECK_CASH)); }
   checkCash() { this.send(new PacketWriter(C.CHECK_CASH)); }
   /**
    * CASHSHOP_OPERATION buys (wallet 1 NX credit / 2 maple points / 4 prepaid, each led by a "paid with Maple Points"

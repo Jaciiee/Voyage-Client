@@ -64,11 +64,13 @@ const WORLD_TAGS = 15, TAG_STEP = 27;
 export const NOTICE = {
   WRONG_PASSWORD: 3, NOT_REGISTERED: 20, BLOCKED: 16, ALREADY_LOGGED_IN: 17, UNKNOWN: 18, TOO_MANY: 19,
   CANT_LOG_GAME: 22, CANT_CONNECT: 23, CONNECT_ERROR: 24, NAME_IN_USE: 5, NAME_OK: 6, BAD_NAME: 10,
-  NO_MORE_CHARS: 9, DELETE_CONFIRM: 13, DELETE_CONFIRM_CASH: 55, BAD_ID: 28, CREATE_BLOCKED: 36,
+  NO_MORE_CHARS: 9, DELETE_CONFIRM: 13, DELETE_CONFIRM_CASH: 55, DELETE_CONFIRM_FAMILY: 57, DELETE_CONFIRM_FAMILY_CASH: 58, BAD_ID: 28, CREATE_BLOCKED: 36,
   PIC_WRONG: 93, NO_PIC: 94, RETURN_TO_TITLE: 7, LAUNCHER: 15,
 };
 // LOGIN_STATUS (and CHARLIST / SERVER_IP) result -> Notice/text
 const LOGIN_NOTICE = { 3: 16, 4: 3, 5: 20, 6: 15, 7: 17, 8: 15, 9: 15, 255: 15, 10: 19, 11: 14, 13: 21, 16: 33, 21: 33, 17: 27, 25: 40 };
+/** Entering the game refused with 0x0C / 0x17: the notice for its second byte (these also go back to the title); 15 for any other. */
+const ENTER_SUB_NOTICE = { 1: 28, 2: 29, 3: 30, 0x13: 25, 0x19: 31, 0x1B: 56 };
 const WORLD_BUSY = 'Since There Are Many\r\nConcurrent Users in This World,\r\nYou May Encounter Some Difficulties During the Game Play.';
 const WORLD_FULL = 'The Concurrent Users in This World\r\nHave Reached the Max.\r\nPlease Try Again Later.';
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -348,7 +350,11 @@ export class LoginScene {
       if (typeof text === 'number' && N.text[text]) d.sprites.push(new WzSprite(N.text[text], x + 119, y + 21));
       else {
         const lines = String(text).replace(/\r\n?/g, '\n');
-        d.drawFront = (ctx) => wrapText(ctx, lines, 215).slice(0, 7).forEach((ln, i) => uiText(ctx, ln, x + 121, y + 30 + i * 15, { color: '#5a3200' }));
+        // centred top to bottom in the box the notice's own text pictures fill (221x109 at +119, +21)
+        d.drawFront = (ctx) => {
+          const ls = wrapText(ctx, lines, 215).slice(0, 7), top = y + 21 + Math.round((109 - ls.length * 15) / 2);
+          ls.forEach((ln, i) => uiText(ctx, ln, x + 121, top + i * 15, { color: '#5a3200' }));
+        };
       }
       const close = (v) => { this.closeDialog(d); resolve(v); };
       if (kind === 'yesno' || kind === 'nexon') {
@@ -390,6 +396,12 @@ export class LoginScene {
   /** Shows a login-table result; result 7 also sends the player back to the title. */
   async loginFailed(res) {
     if (res.reason === 14 || res.reason === 15) { await this.notice(res.reason === 14 ? 27 : 26, 'nexon'); return; }
+    if ((res.reason === 0x0C || res.reason === 0x17) && res.sub !== undefined) {
+      const n = ENTER_SUB_NOTICE[res.sub];
+      await this.notice(n ?? 15);
+      if (n !== undefined) throw new BackToTitle();
+      return;
+    }
     const n = this.loginResult(res);
     if (n !== null) await this.notice(n);
     if (res.reason === 7) throw new BackToTitle();
@@ -747,7 +759,8 @@ export class LoginScene {
       } catch (e) {
         if (!(e instanceof BackToTitle)) {
           console.error(e);
-          await this.notice(NOTICE.CANT_CONNECT);
+          // turned away by the game server (not the client made for it), or the connection failed
+          await this.notice(e?.refused ? 'This client is not made for this server.' : NOTICE.CANT_CONNECT);
         }
       }
       this.s?.close();
@@ -1009,7 +1022,8 @@ export class LoginScene {
         } catch (e) { reject(cancelled ? new BackToTitle() : e); } finally { loading.close(); pending = false; }
       };
       let worldStatus = 0;   // the open world's SERVERSTATUS: 1 (busy) puts WorldNotice/Populated/1 on its paper
-      const openWorld = (w, status = 0) => {
+      // pre: the channel the server picks for it, selected as it opens
+      const openWorld = (w, status = 0, pre = -1) => {
         worldStatus = status;
         if (!world || closing) { scroll = new WzSprite(WS.scroll[0], roll.x, roll.y, { loop: false }); closing = false; sfx.play('UI/RollDown'); }
         world = w; channel = -1;
@@ -1024,6 +1038,7 @@ export class LoginScene {
           b.enabled = !!c; b.users = c?.load || 0; b.downSound = 'UI/WorldSelect';
           return b;
         });
+        if (w.channels[pre]) { channel = pre; select.anim.reset(); }
         this.assets.preload([...chButtons.flatMap((b) => b.frames()), WS.channel.chgauge, ...select.frames()]).then(() => this.hover());
       };
       const closeWorld = () => {
@@ -1040,11 +1055,11 @@ export class LoginScene {
         btn.enabled = false;   // the clicked tag stays pressed
         picked = true; focusWorld(w.id);      // and takes the keyboard focus, so no other tag keeps the highlight
         pending = true;
-        let status;
-        try { status = await this.s.serverStatus(w.id); } catch (e) { reject(e); return; } finally { pending = false; }
+        let status, pre;
+        try { ({ status, channel: pre } = await this.s.serverStatus(w.id)); } catch (e) { reject(e); return; } finally { pending = false; }
         if (status === 2) { await this.notice(WORLD_FULL, 'info'); btn.enabled = true; return; }
         if (status === 1) await this.notice(WORLD_BUSY, 'info');
-        openWorld(w, status);
+        openWorld(w, status, pre);
       };
       const hang = WS.BtWorld[0]?.disabled?.[0];
       const worldButtons = this.worlds.map((w, i) => {
@@ -1332,7 +1347,7 @@ export class LoginScene {
         const res = await this.s.selectChar(c.stats.id, pic);
         if (list.picFlag === 0 && !res.wrongPic) this.picRegistered(list);
         if (res.wrongPic) { await this.notice(NOTICE.PIC_WRONG); return; }
-        if (res.code !== undefined) { await this.loginFailed({ reason: res.code }); return; }
+        if (res.code !== undefined) { await this.loginFailed({ reason: res.code, sub: res.sub }); return; }
         sfx.play('Game/GameIn');
         store.set(lastKey, String(c.stats.id));
         this.s.close();
@@ -1356,11 +1371,13 @@ export class LoginScene {
         if (sel < 0) return;
         const c = list.chars[sel];
         if (list.picFlag !== 1) { await this.notice(NOTICE.NO_PIC, 'info'); return; }
-        // the PIC first, then the question (Cygnus and Aran warn about their Cash items)
+        // the PIC first, then the question (Cygnus and Aran warn about their Cash items, a family member that the
+        // family is left)
         const pic = await this.softKey();
         if (pic === null) return;
-        const race = Math.floor(c.stats.job / 1000);
-        if (!(await this.notice(race === 1 || race === 2 ? NOTICE.DELETE_CONFIRM_CASH : NOTICE.DELETE_CONFIRM, 'yesno'))) return;
+        const race = Math.floor(c.stats.job / 1000), cash = race === 1 || race === 2;
+        const ask = c.family ? (cash ? NOTICE.DELETE_CONFIRM_FAMILY_CASH : NOTICE.DELETE_CONFIRM_FAMILY) : cash ? NOTICE.DELETE_CONFIRM_CASH : NOTICE.DELETE_CONFIRM;
+        if (!(await this.notice(ask, 'yesno'))) return;
         // the selection is cleared as the request goes out
         sel = -1; rollPanel(); refresh();
         const state = await this.s.deleteChar(c.stats.id, pic);
@@ -1551,7 +1568,7 @@ export class LoginScene {
           const r = await this.s.selectFromAll(c.stats.id, c.world, pic, picMode);
           if (picMode === 0 && !r.wrongPic) this.picRegistered();
           if (r.wrongPic) { await this.notice(NOTICE.PIC_WRONG); return; }
-          if (r.code !== undefined) { await this.loginFailed({ reason: r.code }); return; }
+          if (r.code !== undefined) { await this.loginFailed({ reason: r.code, sub: r.sub }); return; }
           sfx.play('Game/GameIn');
           this.s.close();
           done = true;

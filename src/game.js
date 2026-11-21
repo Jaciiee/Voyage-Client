@@ -80,6 +80,8 @@ import { Pet, pickReaction, NO_LOOT_MAP } from './pets.js';
 import { Summon, PUPPET_RANGE, PUPPETS, MAGIC_SUMMONS } from './summons.js';
 import { Dragon } from './dragon.js';
 import { CashShopWin } from './ui/cashshop.js';
+import { MtsWin } from './ui/mts.js';
+import { CashTradeWin } from './ui/cashtrade.js';
 import { ChannelSession } from './net/channel.js';
 import { wsTransport } from './net/connection.js';
 import { bridgeUrl } from './ui/login-ui.js';
@@ -839,8 +841,10 @@ const GUILD_MESSAGES = {
 };
 const GUILD_ERROR = 'The guild request has not been accepted, due to unknown reason.';
 /** PacketCreator.getMiniRoomError codes for trades */
-const BUDDY_MESSAGES = { 11: 'Your buddy list is full.', 12: "That character's buddy list is full.", 13: 'That character is already on your buddy list.',
-  14: 'You cannot add a GM to your buddy list.', 15: 'That character is not registered.' };
+const BUDDY_MESSAGES = { 11: 'Your buddy list is full.', 12: "The user's buddy list is full", 13: 'That character is already registered as your buddy.',
+  14: 'Gamemaster is not available as a buddy.', 15: 'That character is not registered.' };
+/** Buddy answers 0x10 / 0x11 / 0x13 / 0x16: the server's own reason, or this. */
+const BUDDY_DENIED = 'The request was denied due to an unknown error.';
 
 /** This computer's wall-clock time, as ms whose UTC fields read as the local time. */
 const localWallMs = () => Date.now() - new Date().getTimezoneOffset() * 60000;
@@ -1168,8 +1172,8 @@ export class Game {
     this.net.enterMTS();
     this.lockExclusive();
   }
-  /** SET_CASH_SHOP: the server took us off the map; swap the world for the shop screen. */
-  openCashShop(d) {
+  /** SET_CASH_SHOP / SET_ITC: the server took us off the map; swap the world for the shop (or MTS) screen. */
+  openCashShop(d, mts = false) {
     this.inCashShop = true;
     this.releaseExclusive();   // the answer to the request
     const info = d.info;
@@ -1185,7 +1189,25 @@ export class Game {
     this.weather.stop(false); this.skillLoop?.stop(); this.skillLoop = null;   // nothing of the map plays on in the shop
     music.play('BgmUI/ShopBgm', { fadeOut: 0, fadeIn: 0 });   // a cut, no fade
     setWholeScreen(true); this.setResolution();   // all 800x600 of it, as large as fits the window (and no touch controls)
-    this.csWin = this.windows.show(new CashShopWin(this.windows, d), null);
+    if (mts) { this.inMTS = true; this.mtsWin = this.windows.show(new MtsWin(this.windows, d), null); }
+    else this.csWin = this.windows.show(new CashShopWin(this.windows, d), null);
+  }
+  /**
+   * The inventory beside the cash trade room, which is wider than the ordinary one: right of it when the screen has
+   * room, else left of it, else over the room's fee table (the art's, nothing to click), below its chat.
+   */
+  besideCashRoom(inv, room) {
+    if (room.x + room.w + inv.w <= UI_W) { inv.x = room.x + room.w; inv.y = room.y; }
+    else if (room.x - inv.w >= 0) { inv.x = room.x - inv.w; inv.y = room.y; }
+    else { inv.x = room.x + 398 + Math.max(0, Math.floor((248 - inv.w) / 2)); inv.y = room.y + 158; }
+    this.windows.fit(inv);
+  }
+  /** The 8-digit birthday code a cash trade asks for (year, month, day), as a number; null when cancelled. */
+  async askBirthday() {
+    if (config.skipBirthday) return config.birthdayCode;
+    const b = await this.windows.askText('For the sake of privacy,\nplease enter your 8-digit birthday code.\nex) year/month/day -> 19820911', '', { max: 8 });
+    if (b === null || b === undefined || String(b).length !== 8) return null;
+    return parseInt(String(b).trim(), 10) || 0;
   }
   /** The status bar's chat line is a page element over the canvas: hide it while the shop screen is up. */
   showChatBox(on) { const el = this.statusBar?.chat?.el; if (el) el.style.visibility = on ? '' : 'hidden';
@@ -1215,7 +1237,7 @@ export class Game {
       this.setServerTime(entered.serverTime);
       const info = entered.info;
       if (info) { Object.assign(this.stats, info.stats); this.inventory = info.inventory; this.meso = info.meso; this.rings = info.rings; this.newYearCards = info.cards || []; this.myCards = this.newYearCards.map((c) => c.id); this.warmAmmoInfo(); }
-      if (fromCashShop) { this.inCashShop = false; if (this.csWin) this.windows.close(this.csWin); this.csWin = null; music.stop(600); setWholeScreen(false); this.setResolution(); }
+      if (fromCashShop) { this.inCashShop = this.inMTS = false; if (this.csWin) this.windows.close(this.csWin); if (this.mtsWin) this.windows.close(this.mtsWin); this.csWin = this.mtsWin = null; music.stop(600); setWholeScreen(false); this.setResolution(); }
       this.partySearch.restore = true;   // a search that was on is taken up again on the new channel
       const loaded = this.changeMap(entered.mapId, { portalIdx: entered.portal });
       net.flush();
@@ -1531,9 +1553,9 @@ export class Game {
     const win = this.windows.wins.messenger;
     if (e.op === 'invite') {
       // Messenger invitations off in the Game Option, or from someone on the Blacklist: turned down at once
-      if (!this.optionAllowed('chatInvite') || this.windows.wins.userlist?.blacklisted(e.from)) { this.net?.messengerDecline(e.from, this.player.name); return; }
+      if (!this.optionAllowed('chatInvite') || this.windows.wins.userlist?.blacklisted(e.from)) { this.net?.messengerDecline(e.from, this.player.name, true); return; }
       if (await notify(this.windows, 'messenger', e.from)) win.accept(e.id);
-      else this.net?.messengerDecline(e.from);
+      else this.net?.messengerDecline(e.from, this.player.name, false);
       return;
     }
     if (!win.active) return;
@@ -3213,6 +3235,10 @@ export class Game {
     const h = this.net.h;
     Object.assign(h, {
       cashShopOpen: (d) => this.openCashShop(d),
+      mtsOpen: (d) => this.openCashShop(d, true),
+      mtsCash: (nx, mp) => this.mtsWin?.setCash(nx, mp),
+      mtsCharge: () => this.mtsWin?.charged(),
+      mts: (e) => this.mtsWin?.result(e),
       csCash: (c) => this.csWin?.setCash(c),
       // the locker's last short is your character slots: the slot item's tooltip counts them (after View All too)
       csInventory: (items, storageSlots, charSlots) => { if (charSlots !== null && charSlots !== undefined) this.charSlots = charSlots; this.csWin?.setInventory(items, storageSlots); },
@@ -3318,18 +3344,23 @@ export class Game {
         if (t) this.windows.notice(t);
       },
       whisperResult: (r) => this.onWhisperResult(r),
+      whisperBlocked: (b) => this.hud.message(b.notFound ? `Unable to find '${b.name}'` : `'${b.name}' have currently disabled whispers.`, b.notFound ? CHAT_COLORS.notice : CHAT_COLORS.whisper),
       findResult: (f) => this.onFindResult(f),
       buddies: (list) => { this.buddies = list; },
       // a buddy coming online gets its balloon (a guildmate's comes from the guild); one moving onto your channel gets the same-channel one
-      buddyChannel: (id, ch) => {
+      buddyChannel: (id, ch, inShop) => {
         const b = this.buddies.find((x) => x.id === id);
         if (!b) return;
-        const was = b.channel; b.channel = ch;
+        const was = b.channel; b.channel = ch; b.inShop = inShop;
         if (was < 0 && ch >= 0) { if (!this.guild?.members.some((m) => m.id === id)) notifyLogin(this.windows, b.name); }
         else if (was !== ch && ch === this.channel) notifyLogin(this.windows, b.name, true);
       },
       buddyCapacity: (n) => { this.buddyCapacity = n; },
-      buddyMessage: (code) => { const t = BUDDY_MESSAGES[code]; if (t) this.windows.notice(t); },
+      buddyMessage: (code, reason) => {
+        const t = [0x10, 0x11, 0x13, 0x16].includes(code) ? reason || BUDDY_DENIED : BUDDY_MESSAGES[code];
+        if (t) this.windows.notice(t);
+      },
+      buddyUpdate: (id, entry) => { const i = this.buddies.findIndex((x) => x.id === id); if (i >= 0) this.buddies = this.buddies.map((x, k) => (k === i ? entry : x)); },
       buddyRequest: (b) => {
         if (b.entry && !this.buddies.some((x) => x.id === b.entry.id)) this.buddies = [...this.buddies, b.entry];
         notify(this.windows, 'buddy', b.name).then((ok) => (ok ? this.net.buddyAccept(b.id) : this.net.buddyDelete(b.id)));
@@ -3348,10 +3379,13 @@ export class Game {
       notifyLevel: (n) => this.hud.message(`<${n.type === 2 ? 'Guild' : 'Family'}> ${n.name} has reached Lv. ${n.level}.`, CHAT_COLOR.error),
       tradeOpen: (t) => {
         if (this.tradeWin) return;
-        const w = this.tradeWin = this.windows.show(new TradeWin(this.windows), null);
+        const w = this.tradeWin = this.windows.show(t.cash ? new CashTradeWin(this.windows) : new TradeWin(this.windows), null);
         w.slot = t.slot;
         if (t.partner) w.partnerJoined(t.partner, this.lookFrom(t.look)); else w.say('Waiting for the other player to accept...', '#555');
-        if (!this.mobileHud?.shown) this.windows.open('inventory');   // (MOBILE UI opens its own beside the trade)
+        if (!this.mobileHud?.shown) {   // (MOBILE UI opens its own beside the trade)
+          const inv = this.windows.open('inventory');
+          if (t.cash && inv) this.besideCashRoom(inv, w);
+        }
       },
       // a guild alliance's invitation: refused at once with alliance invitations off in the Game Option or while
       // another is up; O takes it
@@ -3363,7 +3397,20 @@ export class Game {
       // trade requests off in the Game Option, or from someone on the Blacklist: turned down at once (reason 4)
       tradeInvite: (name, id, cash) => {
         if (!this.optionAllowed('tradeRequest') || this.windows.wins.userlist?.blacklisted(name)) { this.net.tradeDecline(id, 4); return; }
-        notify(this.windows, cash ? 'cashTrade' : 'trade', name).then((ok) => (ok ? this.net.tradeAccept(id) : this.net.tradeDecline(id, 3)));
+        notify(this.windows, cash ? 'cashTrade' : 'trade', name).then(async (ok) => {
+          if (!ok) { this.net.tradeDecline(id, 3); return; }
+          if (!cash) { this.net.tradeAccept(id); return; }
+          // a cash trade: the birthday first (cancelled, it's turned down)
+          const b = await this.askBirthday();
+          if (b === null) this.net.tradeDecline(id, 3); else this.net.cashTradeAccept(b, id);
+        });
+      },
+      // a cash trade's birthday step answered (only with no room open): asked again, or on to the room / the visit
+      cashTradeBirthday: (e) => {
+        if (this.tradeWin) return;
+        if (!e.ok) { this.askBirthday().then((b) => { if (b !== null) this.net.cashTradeBirthday(e, b); }); return; }
+        if (e.action === 0) this.net.cashTradeStart(e.value);
+        else if (e.action === 4) this.net.tradeVisit(e.value, e.f, e.s, e.buf);
       },
       tradePartner: (name, look) => this.tradeWin?.partnerJoined(name, this.lookFrom(look)),
       tradeItem: (side, slot, it) => this.tradeWin?.setItem(side, slot, it),
@@ -3457,9 +3504,10 @@ export class Game {
       partyInvite: (p) => {
         const from = p.name.startsWith('PS: ') ? p.name.slice(4) : p.name;
         // a Party Search one is ignored with party or Party Search invitations off, or from someone on the Blacklist
-        if (p.autoJoin) { if (this.optionAllowed('partyInvite') && this.optionAllowed('partySearch') && !this.windows.wins.userlist?.blacklisted(from)) this.net.partyOp(3, p.id); return; }
-        if (!this.optionAllowed('partyInvite') || this.windows.wins.userlist?.blacklisted(from) || this.windows.order.some((w) => w.kind === 'party' || w.kind === 'partySearch')) { this.net.partyDeny(p.name); return; }
-        notify(this.windows, 'party', p.name).then((ok) => (ok ? this.net.partyOp(3, p.id) : this.net.partyDeny(p.name)));
+        if (p.autoJoin) { if (this.optionAllowed('partyInvite') && this.optionAllowed('partySearch') && !this.windows.wins.userlist?.blacklisted(from)) this.net.partyJoin(p.id, p.autoJoin); return; }
+        const me = this.player.name, open = this.windows.order.some((w) => w.kind === 'party' || w.kind === 'partySearch');
+        if (!this.optionAllowed('partyInvite') || this.windows.wins.userlist?.blacklisted(from) || open) { this.net.partyDeny(p.name, me, open ? 0x16 : 0x15); return; }
+        notify(this.windows, 'party', p.name).then((ok) => (ok ? this.net.partyJoin(p.id) : this.net.partyDeny(p.name, me, 0x17)));
       },
       partyMessage: (code, text) => {
         const t = code === 0x24 ? text || PARTY_ERROR : PARTY_MESSAGES[code] ?? PARTY_ERROR;
@@ -3605,9 +3653,7 @@ export class Game {
         if (Number(hit.attach)) this.fx.push({ anim, follow: sm, flip: !!sm.facingRight });
         else this.fx.push({ anim, x: sm.x - 15 + Math.random() * 30, y: sm.y - 40 + Math.random() * 40, flip: !!dir });
       }),
-      summonSkill: later((owner, skill, stance) => {
-        for (const sm of this.summons.values()) if (sm.owner === owner && sm.skill === skill) sm.play(`skill${(stance & 0x7f) || 1}`);
-      }),
+      summonSkill: later((owner, oid, action, cosmic) => this.summonPose(owner, oid, action, cosmic)),
       playerDamaged: later((d) => this.onPlayerDamaged(d)),
       spawnMob: later(async (m) => {
         await this.spawnLife('Mob', m, false);
@@ -3771,13 +3817,14 @@ export class Game {
         if (FOREIGN_SOUND[effect]) sfx.play(FOREIGN_SOUND[effect]);
       }),
       portalSound: () => sfx.play('Game/Portal'),
-      spawnNpc: later((n, controlled) => this.spawnLife('Npc', n, !!controlled)),
+      spawnNpc: later((n) => this.npcSeen(n)),
+      controlNpc: later((on, n) => this.controlNpc(on, n)),
       npcAction: later((oid, action, chat, start, moves) => this.lifeByOid.get(oid)?.npcActed?.(action, chat, start, moves)),
       forcedMapEquip: later(() => this.forceMapEquip()),
       forcedStats: (f) => { this.forcedStats = f; },
       // a change to what you wear, your buffs or skills: goes out with your next movement
       moveElement: (b) => { (this.moveBuf ??= []).push({ cmd: 10, equip: b }); },
-      removeNpc: later((oid) => this.killLife(oid, 0)),
+      removeNpc: later((oid) => this.npcGone(oid, 1)),
       imitatedNpcs: later((list) => this.imitateNpcs(list)),
       blocked: (kind, type) => this.blocked(kind, type),
       drop: later((d) => this.spawnDrop(d)),
@@ -5601,7 +5648,7 @@ export class Game {
     const rand = (a, b) => { const lo = Math.min(a, b), hi = Math.max(a, b); return lo + Math.random() * (hi - lo); };
     let d;
     if (!magic) {
-      if (this.accuracyMiss(info, over) || guarded(m)) d = 0;
+      if (this.accuracyMiss(info, over, m) || guarded(m)) d = 0;
       else if (immuneTo(m, WEAPON_IMMUNE)) d = 1;
       else {
         const job = this.stats?.job || 0, cyg = Math.floor(job / 1000) === 1 ? Math.floor((job % 1000) / 100) : 0;
@@ -6163,6 +6210,16 @@ export class Game {
     } else if ((a = arg('/find')) !== null) {
       if (a !== me) this.net.find(a);
       return;
+    } else if ((a = arg('/cashtrade')) !== null) {
+      // a cash trade (Cash Shop items): the birthday, then the server's go-ahead; a plain Cosmic server has none
+      if (config.cosmic) { say('Not available'); return; }
+      if (this.player.morph) { this.transformRefusal(); return; }
+      if (this.gm) { say('Not available with an Admin account.'); return; }
+      if (this.tradeWin || this.playerShop || (this.gameRoom && this.windows.order.includes(this.gameRoom))) { say('Not available'); return; }
+      const rp = [...this.others.values()].find((o) => o.name?.toLowerCase() === a.toLowerCase());
+      if (!rp) { say('Unable to find the character.'); return; }
+      this.askBirthday().then((b) => { if (b !== null) this.net.cashTradeAsk(rp.id); });
+      return;
     } else if ((a = arg('/trade') ?? arg('/game trade')) !== null) {
       if (this.player.morph) { this.transformRefusal(); return; }
       if (this.gm) { say('Not available with an Admin account.'); return; }
@@ -6407,7 +6464,7 @@ export class Game {
       case 'askName': this.askGuildName(); break;
       case 'agreement':
         if (this.party?.leader === me) { heracleSays(this.windows, 'Now I am asking other guild members for the agreement of forming a guild~ Please hold on~...'); break; }
-        this.showModal(new GuildContractWin(this.windows, d.master, d.name, (ok) => this.net.guildAgree(ok)));
+        this.showModal(new GuildContractWin(this.windows, d.master, d.name, (ok) => this.net.guildAgree(ok, this.player.id)));
         break;
       case 'invite': {
         // refused at once with guild invites off, from someone on the Blacklist (0x35) or while another is up (0x36)
@@ -6581,8 +6638,9 @@ export class Game {
     if (text && !this.optionAllowed('whisper')) this.hud.message('Since the character has the whispers blocked at this point, you may not receive an answer.', CHAT_COLOR.result);
   }
   onWhisper(w) {
-    // whispers off in the Game Option, or from someone on the Blacklist: not shown, and they are told so
-    if (!this.optionAllowed('whisper') || this.windows.wins.userlist?.blacklisted(w.from)) { this.net?.whisperBlock(w.from); return; }
+    // whispers off in the Game Option, or from someone on the Blacklist: not shown, and they are told so (a GM's
+    // always shows)
+    if (!w.gm && (!this.optionAllowed('whisper') || this.windows.wins.userlist?.blacklisted(w.from))) { this.net?.whisperBlock(w.from); return; }
     // who whispered you is your latest contact (what /whisper alone goes to, and first in the Whisper box's list)
     const sb = this.statusBar;
     if (sb) sb.whisperNames = [w.from, ...(sb.whisperNames || []).filter((n) => n !== w.from)].slice(0, 10);
@@ -7688,7 +7746,7 @@ export class Game {
       for (let i = 0; i < lines; i++) {
         if (sp && i >= half) {
           const src = dmg[i - half], info = m.src?.info || {};
-          const missed = this.accuracyMiss(info, Math.max(0, (info.level || 0) - (this.stats?.level || 1)));
+          const missed = this.accuracyMiss(info, Math.max(0, (info.level || 0) - (this.stats?.level || 1)), m);
           dmg.push(src > 0 && !missed ? this.partnerHit(src, (skillId ? sp.y : sp.x) || 0) : 0); crits.push(crits[i - half]);
           continue;
         }
@@ -9482,11 +9540,14 @@ export class Game {
     const st = steps[orbs - 2];
     return Array.isArray(st) ? Math.trunc((lv * st[0] - st[0]) / 29) + st[1] + dmg : dmg + st;
   }
-  /** A fixed-damage skill misses by level alone: your level x 100 / (255 + 150 per level the monster has over you), times 0.7-1.3, under its avoid. */
+  /**
+   * A fixed-damage skill misses by level alone: your level x 100 / (255 + 150 per level the monster has over you), times
+   * 0.7-1.3, under its avoid (with its avoid buff, as every miss check).
+   */
   fixedMiss(m) {
     const info = m.src?.info || {}, lv = this.stats?.level || 1, over = Math.max(0, (info.level || 0) - lv);
     const hit = (lv * 100) / (over * 150 + 255), r = hit * (0.7 + Math.random() * 0.6);
-    return r < Math.min(999, Math.max(0, info.eva || 0));
+    return r < Math.min(999, Math.max(0, (info.eva || 0) + this.mobBuff(m, 5)));
   }
   /**
    * One damage line of a physical attack (shot or close up) on monster m:
@@ -9509,7 +9570,7 @@ export class Game {
     // a GM's swings never miss and ignore the level gap (not a touch attack's)
     const exempt = !shot && !touch && Math.floor((job % 1000) / 100) === 9;
     const over = exempt ? 0 : Math.max(0, (info.level || 0) - (this.stats?.level || 1));
-    if (!exempt && this.accuracyMiss(info, over)) return { d: 0, c: false };
+    if (!exempt && this.accuracyMiss(info, over, m)) return { d: 0, c: false };
     if (skillId === SHADOW_MESO) return this.shadowMesoHit(info, ld, over);
     // Aran's blows are all swings; Rush and Blast swing three times in five; Brandish's second blow swings
     const aran = Math.floor(job / 100) === 21 || job === 2000;
@@ -9540,7 +9601,7 @@ export class Game {
       const cv = new RegExp(`${held.elem}(\\d)`).exec(info.elemAttr || '')?.[1], p = (held.ld.z || 0) / 100;
       d = cv === '1' ? d * (1 - p) : cv === '2' ? d * (1 - p * 0.5) : cv === '3' ? Math.min(199999, Math.max(d, d * (1 + p * 0.5))) : d;
     }
-    const pdd = IGNORE_DEFENCE.has(skillId) ? 0 : Math.min(1999, Math.max(0, info.PDDamage || 0));
+    const pdd = IGNORE_DEFENCE.has(skillId) ? 0 : Math.min(1999, Math.max(0, (info.PDDamage || 0) + this.mobBuff(m, 1)));
     const base = Math.trunc(d - rand(pdd * 0.5, pdd * 0.6));
     // Flamethrower and Ice Splitter add Elemental Boost's damage % to their own once it is learned
     let pct = Number(ld?.damage) || 0;
@@ -9558,6 +9619,7 @@ export class Game {
     rate = Math.min(100, Math.max(0, rate));
     const c = rate > 0 && critDmg > 100 && Math.random() * 100 < rate;
     if (c) d = (d * critDmg) / 100;
+    if (this.mobBuff(m, 14) && skillId !== 1311005) d = (d * this.mobBuff(m, 14)) / 100;   // its weapon defence up (%), but for Sacrifice
     // Assassinate: x(seconds in Dark Sight, up to its time, / 3 + 1)
     if (skillId === ASSASSINATE) d *= Math.floor(Math.min(this.assassinSec || 0, ld?.time || 0) / 3) + 1;
     // Wind Walk and Vanish (out of Dark Sight) strike harder
@@ -9600,7 +9662,7 @@ export class Game {
     if (ld?.fixdamage) return { d: this.fixedMiss(m) ? 0 : ld.fixdamage, c: false };
     const INT = this.totalStat('int'), LUK = this.totalStat('luk'), lv = this.stats?.level || 1;
     const over = Math.max(0, (info.level || 0) - lv), acc = ((Math.floor(INT / 10) + Math.floor(LUK / 10)) * 5 * 100) / (over * 10 + 255);
-    if (rand(acc * 0.5, acc * 1.2) < clamp(info.eva || 0, 0, 999)) return { d: 0, c: false };
+    if (rand(acc * 0.5, acc * 1.2) < clamp((info.eva || 0) + this.mobBuff(m, 5), 0, 999)) return { d: 0, c: false };
     const soul = sb.level(DRAGON_SOUL) ? num(sb.levelData(DRAGON_SOUL)?.mad) : 0;
     const MAD = clamp(clamp(INT + this.equipStat('matk') + soul, 0, 1999) + buff('matk'), 0, 1999);
     const k = (num(sb.level(EVAN_MAGIC_MASTERY) ? sb.levelData(EVAN_MAGIC_MASTERY)?.mastery : ld?.mastery) * 5 + 10) * 0.009;
@@ -9616,8 +9678,9 @@ export class Game {
     if (skillId === FP_COMPOSITION) d = vs(d / 2, digit('F')) + vs(d / 2, digit('S'));
     else if (skillId === IL_COMPOSITION) d = vs(d / 2, digit('L')) + vs(d / 2, digit('I'));
     else d = vs(d, digit(elem));
-    const mdd = clamp(info.MDDamage || 0, 0, 1999);
+    const mdd = clamp((info.MDDamage || 0) + this.mobBuff(m, 3), 0, 1999);
     d -= rand(mdd * 0.5, mdd * 0.6);
+    if (this.mobBuff(m, 15)) d *= this.mobBuff(m, 15) * 0.01;   // its magic defence up (%)
     let rate, critDmg;
     if (crit) {
       rate = crit.rate || 0;
@@ -9649,10 +9712,10 @@ export class Game {
     return { d: Math.trunc(clamp(d, 1, 199999)), c };
   }
   /** Your accuracy x 100 / (255 + 10 a level the monster has over you), x 0.7-1.3, under its avoid: a miss. */
-  accuracyMiss(info, over) {
+  accuracyMiss(info, over, m = null) {
     const now = Date.now(), accBuff = Math.max(0, ...(this.buffs || []).filter((b) => b.acc && b.until > now).map((b) => b.acc));
     const acc = Math.min(999, Math.max(0, this.accuracy() + accBuff)), hit = (acc * 100) / (over * 10 + 255);
-    return hit * (0.7 + Math.random() * 0.6) < Math.min(999, Math.max(0, info.eva || 0));
+    return hit * (0.7 + Math.random() * 0.6) < Math.min(999, Math.max(0, (info.eva || 0) + (m ? this.mobBuff(m, 5) : 0)));
   }
   /** A Shadow Partner line: pct% of the line it follows, then Wind Walk and Vanish over again. */
   partnerHit(src, pct) {
@@ -10431,6 +10494,52 @@ export class Game {
       if (this.vfx?.boss?.oid === Number(e.spawn.id)) this.vfx.bossHp({ oid: Number(e.spawn.id), hp: -1 });
     }
   }
+  /** SUMMON_SKILL: another player's summon plays a pose (0 stand ... 6-11 skill1-skill6, 12 hit, 13 die, 14 say), facing by bit 7. */
+  summonPose(owner, oid, action, cosmic = false) {
+    // a plain Cosmic server names the summon by its skill and sends the skill pose's number
+    if (cosmic) { for (const sm of this.summons.values()) if (sm.owner === owner && sm.skill === oid) sm.play(`skill${(action & 0x7f) || 1}`); return; }
+    const POSES = ['stand', 'move', 'fly', 'summoned', 'attack1', 'attack2', 'skill1', 'skill2', 'skill3', 'skill4', 'skill5', 'skill6', 'hit', 'die', 'say'];
+    for (const sm of this.summons.values()) {
+      if (sm.oid !== oid || sm.owner !== owner) continue;
+      sm.facingRight = !(action & 0x80);
+      const pose = POSES[action & 0x7f];
+      if (pose) sm.play(pose);
+    }
+  }
+  /**
+   * An NPC is on the map by SPAWN_NPC (flag 1) and/or because we control it (flag 2, SPAWN_NPC_REQUEST_CONTROLLER); it
+   * goes when neither is left. SPAWN_NPC for one we already have only marks it.
+   */
+  npcSeen(n) {
+    const e = this.lifeByOid.get(n.oid);
+    if (e && !e.pending) { e.npcFlags = (e.npcFlags || 0) | 1; return; }
+    this.spawnLife('Npc', n, false).then(() => { const s = this.lifeByOid.get(n.oid); if (s && !s.pending) s.npcFlags = (s.npcFlags || 0) | 1; });
+  }
+  npcGone(oid, flag) {
+    const e = this.lifeByOid.get(oid);
+    if (!e || e.pending) { if (flag === 1) this.killLife(oid, 0); return; }
+    e.npcFlags = (e.npcFlags || 1) & ~flag;
+    if (!e.npcFlags) this.killLife(oid, 0);
+  }
+  /**
+   * SPAWN_NPC_REQUEST_CONTROLLER: we run this NPC's actions and walks now (each sent to the server, done when it comes
+   * back) - one already here changes hands, its stand-in starting again from where it stands - or no longer.
+   */
+  controlNpc(on, n) {
+    const e = this.lifeByOid.get(n.oid);
+    if (!on) {
+      if (e && !e.pending && e.controlled) { e.controlled = false; e.onNpcAction = null; e.npcSim = null; e.npcWaiting = false; }
+      this.npcGone(n.oid, 2);
+      return;
+    }
+    if (e && !e.pending) {
+      e.npcFlags = (e.npcFlags || 1) | 2;
+      e.controlled = true; e.npcSim = null; e.npcWaiting = false;
+      e.onNpcAction = (m, action, chat, start, moves) => this.net?.npcAction(m.oid, action, chat, start, moves);
+      return;
+    }
+    this.spawnLife('Npc', n, true).then(() => { const s = this.lifeByOid.get(n.oid); if (s && !s.pending) s.npcFlags = (s.npcFlags || 0) | 2; });
+  }
   /** Your hits in red (NoRed), other players' in blue (NoBlue); your hits also show the monster's HP bar. */
   damageNumbers(target, dmgs, mine, skillId = 0, crits = [], weaponId = 0, scale = 1) {
     if (mine && target.kind === 'Mob') {
@@ -10810,29 +10919,36 @@ export class Game {
    * then Invincible's x% of what is left. Magic: its magic attack x 0.75-0.80 x itself / 100, less (DEX / 6 + STR / 7 + LUK / 5 + magic defence) x 0.3 (a
    * magician's) or 0.25. Either is held to 1-199999: a blow that isn't dodged does at least 1.
    */
+  /** A monster's buff value while its bit is on (0 otherwise; for bits 12-15 a % where 0 means none). */
+  mobBuff(m, bit) {
+    if (config.cosmic) return 0;   // a plain Cosmic server sends these bits its own way: not applied
+    return m.status?.second & (1 << bit) ? Number(m.buffVal?.[bit]) || 0 : 0;
+  }
   damageTaken(m, power, magic) {
     const info = m.src?.info || {}, s = this.stats || {}, lv = s.level || 1, cls = Math.floor(((s.job || 0) % 1000) / 100);
     const rand = (lo, hi) => lo + Math.random() * (hi - lo), clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v)), now = Date.now();
     const buff = (k) => Math.max(0, ...(this.buffs || []).filter((b) => b[k] && b.until > now).map((b) => b[k]));
     const T = (k) => this.totalStat(k);   // your stats with equipment and Maple Warrior
-    const mobLv = info.level || 0, acc = clamp(info.acc || 0, 0, 999);
+    const mobLv = info.level || 0, acc = clamp((info.acc || 0) + this.mobBuff(m, 4), 0, 999);
     let avoid = clamp(this.avoidability() + buff('avoid'), 0, 999);
     if (mobLv > lv) avoid = Math.max(0, avoid - Math.trunc((mobLv - lv) / 2));
     if (magic) {
       if (acc <= rand(avoid * 0.1, avoid)) return 0;
-      const mad = clamp(info.MADamage ?? power, 0, 1999), mdd = clamp(this.equipStat('mdef') + buff('mdef'), 0, 1999);
-      const d = rand(mad * 0.75, mad * 0.8) * mad * 0.01 - (T('dex') / 6 + T('str') / 7 + T('luk') / 5 + mdd) * (cls === 2 ? 0.3 : 0.25);
+      const mad = clamp((info.MADamage ?? power) + this.mobBuff(m, 2), 0, 1999), mdd = clamp(this.equipStat('mdef') + buff('mdef'), 0, 1999);
+      let d = rand(mad * 0.75, mad * 0.8) * mad * 0.01 - (T('dex') / 6 + T('str') / 7 + T('luk') / 5 + mdd) * (cls === 2 ? 0.3 : 0.25);
+      if (this.mobBuff(m, 13)) d *= this.mobBuff(m, 13) * 0.01;   // its magic attack up (%)
       return Math.trunc(clamp(d, 1, 199999));
     }
     const chance = (avoid / (acc * 4.5)) * 100;
     if (Math.random() * 100 < (cls === 4 ? clamp(chance, 5, 95) : clamp(chance, 2, 80))) return 0;
-    const pad = clamp(power, 0, 1999), pdd = clamp(this.equipStat('wdef') + buff('wdef'), 0, 1999), std = this.standardPdd(cls, lv);
+    const pad = clamp(power + this.mobBuff(m, 0), 0, 1999), pdd = clamp(this.equipStat('wdef') + buff('wdef'), 0, 1999), std = this.standardPdd(cls, lv);
     const k = Math.trunc(cls === 1 ? (T('luk') + T('dex')) * 0.25 + T('int') / 9 + (T('str') * 2) / 7 : T('luk') * 0.25 + T('int') / 9 + (T('dex') * 2) / 7 + T('str') * 0.4);
     let d = rand(pad * 0.8, pad * 0.85) * pad * 0.01 - (k * 0.00125 + 0.28) * pdd;
     if (pdd >= std) d -= (pdd - std) * (k / 900 + lv / 1300 + 0.28) * 0.7;
     else if (mobLv <= lv) d -= ((pdd - std) * (lv / 550 + k * 0.00125 + 0.28) * 13) / (lv - mobLv + 13);
     else d -= (pdd - std) * (lv / 550 + k * 0.00125 + 0.28) * 1.3;
     d -= buff('invincible') * d * 0.01;
+    if (this.mobBuff(m, 12)) d *= this.mobBuff(m, 12) * 0.01;   // its weapon attack up (%)
     return Math.trunc(clamp(d, 1, 199999));
   }
   /** The standard weapon defence for a class (0 beginner .. 5 pirate) at a level, from Base/StandardPDD.img (gaps take the last value). */
@@ -10932,6 +11048,10 @@ export class Game {
    * bubbles, a stun's stars), or a monster skill's `mob` animation and `icon` (its own attack / defence up...).
    */
   async applyMobStatus(m, s) {
+    // the buffs' values: bits 0-5 add to its attack, defence, magic, magic defence, accuracy and avoid; bits 12-15 are
+    // % on the physical / magic damage it deals and the physical / magic damage it takes (see mobBuff)
+    const bit = s.second ? 31 - Math.clz32(s.second) : -1;
+    if ((bit >= 0 && bit <= 5) || (bit >= 12 && bit <= 15)) (m.buffVal ??= {})[bit] = s.value;
     // values the damage rolls read: bit 31's guard, bit 34's damage taken (%)
     if (s.second & 0x80000000) { m.guardValue = s.value; m.disableValue = s.value2 || 0; }
     if (s.first & 0x4) m.takenPct = s.value;
@@ -11521,7 +11641,10 @@ export class Game {
     const lap = (k) => { if (!P) return; const n = performance.now(); P[k] += n - tm; tm = n; };
     if (this.inCashShop) {
       ctx.fillStyle = '#000'; ctx.fillRect(0, 0, VIEW_W, VIEW_H);
-      ctx.save(); ctx.scale(UI_SCALE, UI_SCALE); this.windows?.draw(ctx); ctx.restore();
+      ctx.save(); ctx.scale(UI_SCALE, UI_SCALE); this.windows?.draw(ctx);
+      // the server's scrolling notice runs over the shop screen (800 wide, centred): the text alone, near the top
+      this.hud?.drawBanner?.(ctx, false, { x: (UI_W - 800) >> 1, w: 800 });
+      ctx.restore();
       return;
     }
     // the world is drawn from the camera's whole game pixel, then moved by the rest of it (a step of the canvas's grid),
